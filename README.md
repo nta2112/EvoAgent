@@ -48,10 +48,8 @@
 ReAgent-V supports a range of real-world tasks via dedicated application modules:
 
 ### 🧭 VLA Alignment  
-Aligns **Vision-Language-Action (VLA)** models using **Trajectory-wise Preference Optimization (TPO)** guided by ReAgent-V’s reward feedback. Specifically, ReAgent-V evaluates each trajectory across multiple axes—such as task success, temporal stability, visual grounding, and semantic precision—and performs multi-agent reflection to produce refined, high-fidelity reward scores for alignment.
-
-- 📁 Module: `Application/VLA-Alignment`  
-- 📘 Instructions: [VLA Alignment README](https://github.com/aiming-lab/ReAgent-V/blob/main/Application/VLA-Alignment/README.md)
+Aligns **Vision-Language-Action (VLA)** models using **Trajectory-wise Preference Optimization (TPO)** guided by ReAgent-V’s reward feedback. Specifically, ReAgent-V evaluates each trajectory across multiple axes—such as task success, temporal stability, visual grounding, and semantic precision—and performs multi-agent reflection to produce re- 📁 Module: `Application/VLA-Alignment`  
+- 📘 Instructions: [VLA Alignment README](Application/VLA-Alignment/README.md)
 
 ### 🎥 Video Understanding 
 
@@ -65,7 +63,7 @@ Aligns **Vision-Language-Action (VLA)** models using **Trajectory-wise Preferenc
   Iteratively refines outputs by encouraging disagreement and consensus among diverse agent personas (conservative / neutral / aggressive).
 
 - 📁 Module: `ReAgent-V`  
-- 📘 Instructions: [Video Understanding README](https://github.com/aiming-lab/ReAgent-V/blob/main/ReAgent-V/README.md)
+- 📘 Instructions: [Video Understanding README](ReAgent-V/README.md)
 
 ### 📈 Reward-Aware Data Curation and Collection for SFT, DPO, GRPO, and Beyond
 
@@ -121,7 +119,7 @@ ReAgent-V supports **Direct Preference Optimization (DPO)** by reframing itself 
 > ReAgent-V closes the data curation loop. Its multi-agent reward pipeline not only improves current inference but **continuously supplies high-fidelity data** for future optimization—making learning systems **self-refining** in the wild.
 
 - 📁 Module: `ReAgent-V`  
-- 📘 Instructions: [Video Understanding README](https://github.com/aiming-lab/ReAgent-V/blob/main/ReAgent-V/README.md)
+- 📘 Instructions: [Video Understanding README](ReAgent-V/README.md)
 
   
 ## 🧑‍💻 Getting Started
@@ -129,10 +127,14 @@ ReAgent-V supports **Direct Preference Optimization (DPO)** by reframing itself 
 Each subfolder contains its own `README.md` with detailed installation, setup, and training instructions. To get started:
 
 1. Clone the repository  
+```bash
+git clone https://github.com/nta2112/EvoAgent.git
+cd EvoAgent
+```
 2. Follow the environment setup and requirements in each module  
 3. Explore the demo scripts and customize as needed
 
-💬 If you have questions or encounter any issues, feel free to open an [issue](https://github.com/aiming-lab/ReAgent-V/issues) or contact the maintainers.
+💬 If you have questions or encounter any issues, feel free to open an [issue](https://github.com/nta2112/EvoAgent/issues).
 
 ---
 

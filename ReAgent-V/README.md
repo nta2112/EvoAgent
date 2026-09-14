@@ -101,8 +101,8 @@ ReAgentV-NeXT/                             # Repository root
 1. **Clone the Repository**
 
    ```bash
-   git clone https://github.com/aiming-lab/ReAgent-V.git
-   cd ReAgent-V
+   git clone https://github.com/nta2112/EvoAgent.git
+   cd EvoAgent/ReAgent-V
    ```
 
 2. **Create and Activate a Conda Environment (Optional but Recommended)**

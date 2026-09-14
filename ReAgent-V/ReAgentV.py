@@ -86,8 +86,8 @@ class ReAgentV:
                 m["conv_template"],
             )
         )(modules := load_default(path_dict))
-
-        model = model.bfloat16().to("cuda")
+        if not hasattr(model, "hf_device_map"):
+            model = model.to("cuda")
 
         from ReAgentV_utils.model_inference import model_inference
 

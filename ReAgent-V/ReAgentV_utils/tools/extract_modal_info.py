@@ -20,8 +20,9 @@ from ReAgentV_utils.tools.ocr_tools.ocr_utils import get_ocr_docs
 
 
 def retrieve_modal_info(video_path, text, frames, raw_video, clip_model, clip_processor, ocr_docs_total=None, asr_docs_total=None):
-    config_path = "/root/autodl-tmp/Video-RAG-master/LLaVA-NeXT/ReAgentV_config/config.yaml"
-    
+    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    config_path = os.path.join(base_dir, "ReAgentV_config", "config.yaml")
+
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     

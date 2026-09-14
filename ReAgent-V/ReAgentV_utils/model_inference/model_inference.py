@@ -19,7 +19,8 @@ def llava_inference(qs, video):
     conv.append_message(conv.roles[0], question)
     conv.append_message(conv.roles[1], None)
     prompt_question = conv.get_prompt()
-    input_ids = tokenizer_image_token(prompt_question, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).to('cuda')
+    target_device = model.device if hasattr(model, "device") else next(model.parameters()).device
+    input_ids = tokenizer_image_token(prompt_question, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).to(target_device)
     
     if video is not None:
         cont = model.generate(
@@ -35,8 +36,6 @@ def llava_inference(qs, video):
     else:
         cont = model.generate(
             input_ids,
-            images=video,
-            modalities= ["video"],
             do_sample=False,
             temperature=0,
             max_new_tokens=10480,

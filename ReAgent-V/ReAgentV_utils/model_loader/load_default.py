@@ -56,13 +56,21 @@ def load_default(path_dict):
     )
 
     # Load LLaVA (other open-source models can also be used)
-    overwrite_config = {}
+    overwrite_config = path_dict.get("overwrite_config", {})
+    llava_model_name = get_model_name_from_path(path_dict["llava_model_path"]) or "llava_qwen"
+    torch_dtype = path_dict.get("torch_dtype", torch.float16)
+    attn_impl = path_dict.get("attn_implementation", "sdpa")
+    llava_device_map = path_dict.get("llava_device_map", "auto")
+    max_memory = path_dict.get("max_memory", None)
+
     tokenizer, model, image_processor, max_length = load_pretrained_model(
         path_dict["llava_model_path"],
         None,
-        "llava_qwen",
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
+        llava_model_name,
+        torch_dtype=torch_dtype,
+        device_map=llava_device_map,
+        max_memory=max_memory,
+        attn_implementation=attn_impl,
         overwrite_config=overwrite_config
     )
     model.eval()

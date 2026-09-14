@@ -2,11 +2,11 @@ from ReAgentV import *
 
 # Define paths for pre-trained model weights and cache directories
 path_dict = {
-    "clip_model_path": "/root/autodl-tmp/Video-RAG-master/LLaVA-NeXT/models/models--openai--clip-vit-large-patch14-336/snapshots/ce19dc912ca5cd21c8a653c79e251e808ccabcd1",
+    "clip_model_path": "openai/clip-vit-large-patch14-336",
     "clip_cache_dir": "models",
-    "whisper_model_path": "/root/autodl-tmp/Video-RAG-master/LLaVA-NeXT/models/models--openai--whisper-large/snapshots/4ef9b41f0d4fe232daafdb5f76bb1dd8b23e01d7",
+    "whisper_model_path": "openai/whisper-base",
     "whisper_cache_dir": "models",
-    "llava_model_path": "/root/autodl-tmp/Video-RAG-master/LLaVA-NeXT/models/models--lmms-lab--LLaVA-Video-7B-Qwen2/snapshots/013210b3aff822f1558b166d39c1046dd109520f",
+    "llava_model_path": "lmms-lab/LLaVA-Video-7B-Qwen2",
     "llava_cache_dir": "models",
 }
 
