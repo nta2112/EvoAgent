@@ -74,17 +74,26 @@ def load_default(path_dict):
         overwrite_config=overwrite_config
     )
     
-    # Đảm bảo vision_tower được nạp dữ liệu thật lên GPU, tránh lỗi meta tensor của accelerate
+    # Đảm bảo vision_tower được nạp dữ liệu thật lên cuda:0 (SigLIP ~1.5GB không tốn nhiều VRAM)
     vision_tower = model.get_vision_tower()
     if vision_tower is not None:
-        if not getattr(vision_tower, "is_loaded", False):
-            vision_tower.load_model(device_map=llava_device_map)
-        
-        # Nếu vision_tower có bất kỳ tham số nào ở device 'meta', chuyển sang GPU thực
-        for p in vision_tower.parameters():
-            if p.is_meta:
-                vision_tower.to(device="cuda:0", dtype=torch_dtype)
-                break
+        # Tải thẳng model weights lên cuda:0 thay vì để accelerate biến thành meta tensor
+        try:
+            from transformers import SigLipVisionModel
+            vt_name = getattr(vision_tower, "vision_tower_name", "google/siglip-so400m-patch14-384")
+            vt_model = SigLipVisionModel.from_pretrained(
+                vt_name,
+                torch_dtype=torch_dtype,
+                device_map="cuda:0"
+            )
+            del vt_model.vision_model.encoder.layers[-1:]
+            import torch.nn as nn
+            vt_model.vision_model.head = nn.Identity()
+            vt_model.requires_grad_(False)
+            vision_tower.vision_tower = vt_model
+            vision_tower.is_loaded = True
+        except Exception as e:
+            print(f"Warning re-loading vision tower: {e}")
 
     model.eval()
 
