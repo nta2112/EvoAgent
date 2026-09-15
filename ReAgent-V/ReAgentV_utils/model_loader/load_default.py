@@ -92,6 +92,10 @@ def load_default(path_dict):
             vt_model.requires_grad_(False)
             vision_tower.vision_tower = vt_model
             vision_tower.is_loaded = True
+            
+            # Gỡ bỏ hook của accelerate trên vision_tower để tránh lỗi meta tensor
+            from accelerate.hooks import remove_hook_from_module
+            remove_hook_from_module(vision_tower, recurse=True)
         except Exception as e:
             print(f"Warning re-loading vision tower: {e}")
 
