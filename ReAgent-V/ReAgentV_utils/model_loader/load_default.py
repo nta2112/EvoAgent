@@ -23,21 +23,59 @@ from llava.conversation import conv_templates, SeparatorStyle
 
 def _force_remove_all_hooks(module):
     """
-    Xóa TOÀN BỘ accelerate hooks (_hf_hook) khỏi module và tất cả sub-modules.
-    Thao tác trực tiếp trên thuộc tính để tránh lỗi với meta tensor.
+    Xóa TOÀN BỘ accelerate hooks khỏi module và tất cả sub-modules.
+    Khôi phục forward method gốc và xóa triệt để _hf_hook, _old_forward.
     """
+    if module is None:
+        return
+
+    # 1. Thử dùng hàm chuẩn của accelerate nếu có
+    try:
+        from accelerate.hooks import remove_hook_from_module
+        remove_hook_from_module(module, recurse=True)
+    except Exception:
+        pass
+
+    # 2. Quét thủ công từng submodule để đảm bảo sạch 100%
     for mod in module.modules():
-        if hasattr(mod, "_hf_hook"):
-            hf_hook = mod._hf_hook
-            # Khôi phục forward method gốc nếu có
-            old_fwd = getattr(hf_hook, "old_forward", None)
-            if old_fwd is not None and callable(old_fwd):
-                mod.forward = old_fwd
-            # Xóa hook attribute trực tiếp
+        # Khôi phục forward gốc từ _old_forward (nơi accelerate lưu forward ban đầu)
+        if hasattr(mod, "_old_forward"):
             try:
-                del mod._hf_hook
+                mod.forward = mod._old_forward
             except Exception:
                 pass
+            try:
+                delattr(mod, "_old_forward")
+            except Exception:
+                pass
+        elif "forward" in mod.__dict__:
+            # Nếu forward bị gán ở instance level (closure new_forward) mà không có _old_forward,
+            # xóa nó khỏi instance __dict__ để tự động quay về class-level forward method
+            try:
+                del mod.__dict__["forward"]
+            except Exception:
+                pass
+
+        # Gỡ hook sạch sẽ
+        if hasattr(mod, "_hf_hook"):
+            hook = mod._hf_hook
+            try:
+                if hasattr(hook, "detach_hook"):
+                    hook.detach_hook(mod)
+            except Exception:
+                pass
+            try:
+                delattr(mod, "_hf_hook")
+            except Exception:
+                pass
+
+        # Xóa các thuộc tính khác do accelerate thêm vào instance dict
+        for attr in ["to", "cuda", "npu", "xpu", "mlu", "sdaa", "musa"]:
+            if attr in mod.__dict__:
+                try:
+                    del mod.__dict__[attr]
+                except Exception:
+                    pass
 
 
 def load_default(path_dict):
@@ -104,39 +142,60 @@ def load_default(path_dict):
         if has_meta or not getattr(vision_tower, "is_loaded", False):
             print(f"[VT] Vision tower chưa load hoặc còn meta tensor. Đang reload lên cuda:0...")
 
+            # Reset is_loaded để tránh load_model() early return nếu has_meta == True
+            vision_tower.is_loaded = False
+
             # Phương án 1: Dùng LLaVA's own load_model() với device tường minh
             loaded_ok = False
             try:
                 vision_tower.load_model(device_map={"": "cuda:0"})
                 vision_tower.to(dtype=torch.float16)
-                loaded_ok = True
-                print("✅ Vision tower loaded via LLaVA load_model() on cuda:0")
+                if not any(p.is_meta for p in vision_tower.parameters()):
+                    loaded_ok = True
+                    print("✅ Vision tower loaded via LLaVA load_model() on cuda:0")
             except Exception as e1:
                 print(f"⚠️ load_model() thất bại: {e1}")
 
-            # Phương án 2: Tải SiglipVisionModel trực tiếp (tên đúng: SiglipVisionModel)
+            # Phương án 2: Tải SiglipVisionModel từ LLaVA hoặc SiglipVisionModel từ transformers
             if not loaded_ok:
                 try:
-                    # QUAN TRỌNG: tên đúng là SiglipVisionModel (chữ 'g' thường),
-                    # KHÔNG PHẢI SigLipVisionModel (chữ 'L' hoa) - lỗi trước đây!
-                    from transformers import SiglipVisionModel
+                    from llava.model.multimodal_encoder.siglip_encoder import SigLipVisionModel
                     vt_name = getattr(
                         vision_tower, "vision_tower_name",
                         "google/siglip-so400m-patch14-384"
                     )
-                    vt_model = SiglipVisionModel.from_pretrained(
+                    vt_model = SigLipVisionModel.from_pretrained(
                         vt_name,
                         torch_dtype=torch_dtype,
-                        device_map={"": "cuda:0"}   # Explicit device, NOT "auto"
+                        device_map={"": "cuda:0"}
                     )
                     vt_model.eval()
                     vt_model.requires_grad_(False)
                     vision_tower.vision_tower = vt_model
                     vision_tower.is_loaded = True
                     loaded_ok = True
-                    print(f"✅ Vision tower reloaded via SiglipVisionModel on cuda:0 ({vt_name})")
-                except Exception as e2:
-                    print(f"⚠️ SiglipVisionModel fallback thất bại: {e2}")
+                    print(f"✅ Vision tower reloaded via LLaVA SigLipVisionModel on cuda:0 ({vt_name})")
+                except Exception as e2a:
+                    print(f"⚠️ LLaVA SigLipVisionModel fallback thất bại: {e2a}, thử transformers...")
+                    try:
+                        from transformers import SiglipVisionModel
+                        vt_name = getattr(
+                            vision_tower, "vision_tower_name",
+                            "google/siglip-so400m-patch14-384"
+                        )
+                        vt_model = SiglipVisionModel.from_pretrained(
+                            vt_name,
+                            torch_dtype=torch_dtype,
+                            device_map={"": "cuda:0"}
+                        )
+                        vt_model.eval()
+                        vt_model.requires_grad_(False)
+                        vision_tower.vision_tower = vt_model
+                        vision_tower.is_loaded = True
+                        loaded_ok = True
+                        print(f"✅ Vision tower reloaded via transformers SiglipVisionModel on cuda:0 ({vt_name})")
+                    except Exception as e2b:
+                        print(f"⚠️ transformers SiglipVisionModel fallback thất bại: {e2b}")
 
             # Phương án 3: AutoModel (generic fallback)
             if not loaded_ok:
@@ -157,14 +216,16 @@ def load_default(path_dict):
                     vision_tower.is_loaded = True
                     print(f"✅ Vision tower reloaded via AutoModel on cuda:0 ({vt_name})")
                 except Exception as e3:
-                    print(f"⚠️ AutoModel fallback cũng thất bại: {e3}. "
-                          "Inference có thể bị lỗi meta tensor.")
+                    print(f"⚠️ AutoModel fallback cũng thất bại: {e3}.")
         else:
             print("✅ Vision tower đã được load sẵn, không có meta tensor.")
 
-        # Xóa toàn bộ accelerate hooks khỏi vision_tower
+        # Xóa toàn bộ accelerate hooks khỏi vision_tower và inner model
         _force_remove_all_hooks(vision_tower)
-        print("✅ Đã xóa tất cả accelerate hooks khỏi vision_tower")
+        inner_vt = getattr(vision_tower, "vision_tower", None)
+        if inner_vt is not None and isinstance(inner_vt, torch.nn.Module):
+            _force_remove_all_hooks(inner_vt)
+        print("✅ Đã xóa tất cả accelerate hooks khỏi vision_tower và inner model")
 
     # Xóa hooks khỏi mm_projector
     mm_projector = getattr(model.get_model(), "mm_projector", None)
@@ -173,7 +234,7 @@ def load_default(path_dict):
         print("✅ Đã xóa tất cả accelerate hooks khỏi mm_projector")
 
     # -------------------------------------------------------------------
-    # Patch encode_images: bypass hook bằng class-level forward call
+    # Patch encode_images: an toàn, tránh hook và xử lý device chính xác
     # -------------------------------------------------------------------
     def safe_encode_images(images):
         # Bắt lỗi nếu images là meta tensor (do bug upstream)
@@ -197,10 +258,11 @@ def load_default(path_dict):
 
         images = images.to(device=vt_device, dtype=torch.float16)
 
-        # Gọi class-level forward để bypass hook trên vt.__call__
-        # type(vt).forward(vt, images) = LLaVA wrapper forward, không qua _hf_hook
         with torch.no_grad():
-            image_features = type(vt).forward(vt, images)
+            try:
+                image_features = vt(images)
+            except Exception:
+                image_features = type(vt).forward(vt, images)
 
         proj = model.get_model().mm_projector
         try:
@@ -212,9 +274,11 @@ def load_default(path_dict):
 
         image_features = image_features.to(device=proj_device, dtype=torch.float16)
 
-        # Gọi class-level forward của mm_projector để bypass hook
         with torch.no_grad():
-            image_features = type(proj).forward(proj, image_features)
+            try:
+                image_features = proj(image_features)
+            except Exception:
+                image_features = type(proj).forward(proj, image_features)
 
         return image_features
 
