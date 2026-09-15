@@ -103,9 +103,8 @@ def retrieve_modal_info(video_path, text, frames, raw_video, clip_model, clip_pr
     retrieve_pmt = f"Question: {text}\n\n" \
                    "To answer the question step by step, you can provide your retrieve request to assist you by the following JSON format:\n" \
                    f"{cot_json_instruction}"
-    json_request = llava_inference(retrieve_pmt, None)
-
     try:
+        json_request = llava_inference(retrieve_pmt, None)
         request_json = json.loads(json_request)
     except:
         request_json = {}
