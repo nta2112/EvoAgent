@@ -120,16 +120,44 @@ def load_default(path_dict):
     llava_device_map = path_dict.get("llava_device_map", "auto")
     max_memory = path_dict.get("max_memory", None)
 
-    tokenizer, model, image_processor, max_length = load_pretrained_model(
-        model_path=path_dict["llava_model_path"],
-        model_base=None,
-        model_name=llava_model_name,
-        device_map=llava_device_map,
-        torch_dtype="float16",
-        attn_implementation=attn_impl,
-        overwrite_config=overwrite_config,
-        max_memory=max_memory
-    )
+    # -------------------------------------------------------------------
+    # Bảo vệ vocab_size: Ngăn builder.py tự ý thu nhỏ embedding layer từ
+    # 152064 xuống 151647 (do len(tokenizer) == 151647), gây lệch shape với
+    # weights_map [152064, 3584] của Accelerate khi offload/dispatch.
+    # -------------------------------------------------------------------
+    from transformers import PreTrainedModel
+    orig_resize_fn = PreTrainedModel.resize_token_embeddings
+
+    def safe_resize_token_embeddings(self, new_num_tokens=None, pad_to_multiple_of=None):
+        if new_num_tokens is not None:
+            model_vocab_size = getattr(self.config, "vocab_size", 0)
+            if model_vocab_size > 0 and new_num_tokens <= model_vocab_size:
+                print(f"[Embedding] Giữ nguyên vocab_size={model_vocab_size}, bỏ qua thu nhỏ xuống {new_num_tokens}")
+                return self.get_input_embeddings()
+        return orig_resize_fn(self, new_num_tokens=new_num_tokens, pad_to_multiple_of=pad_to_multiple_of)
+
+    PreTrainedModel.resize_token_embeddings = safe_resize_token_embeddings
+
+    try:
+        tokenizer, model, image_processor, max_length = load_pretrained_model(
+            model_path=path_dict["llava_model_path"],
+            model_base=None,
+            model_name=llava_model_name,
+            device_map=llava_device_map,
+            torch_dtype="float16",
+            attn_implementation=attn_impl,
+            overwrite_config=overwrite_config,
+            max_memory=max_memory
+        )
+    finally:
+        PreTrainedModel.resize_token_embeddings = orig_resize_fn
+
+    # Đảm bảo lm_head có đúng shape theo config nếu lỡ bị thu nhỏ ở bất cứ đâu
+    expected_vocab = getattr(model.config, "vocab_size", None)
+    if expected_vocab is not None and hasattr(model, "lm_head") and hasattr(model.lm_head, "weight"):
+        if model.lm_head.weight.shape[0] != expected_vocab:
+            print(f"⚠️ lm_head shape {model.lm_head.weight.shape} lệch với vocab_size {expected_vocab}, khôi phục...")
+            orig_resize_fn(model, expected_vocab)
 
     # -------------------------------------------------------------------
     # Fix vision tower: đảm bảo không còn meta tensor

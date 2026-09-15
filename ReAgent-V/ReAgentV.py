@@ -188,37 +188,44 @@ class ReAgentV:
             text=question, answer=initial_answer, eval_report=eval_report
         )
         neutral_res = llava_inference(neutral_template, video)
-        try:
-            neutral_parsed = json.loads(neutral_res)
-            ans_neutral = neutral_parsed["final_answer"]
-            conf_neutral = float(neutral_parsed["confidence"])
-        except Exception:
-            ans_neutral = None
-            conf_neutral = 0.0
+        def _parse_agent_json(res_text, default_ans):
+            if not res_text:
+                return default_ans, 0.0
+            import re
+            try:
+                data = json.loads(res_text.strip())
+                return data.get("final_answer", default_ans), float(data.get("confidence", 0.5))
+            except Exception:
+                pass
+            try:
+                cleaned = re.sub(r"^```(?:json)?\s*", "", res_text.strip(), flags=re.MULTILINE)
+                cleaned = re.sub(r"\s*```$", "", cleaned, flags=re.MULTILINE).strip()
+                data = json.loads(cleaned)
+                return data.get("final_answer", default_ans), float(data.get("confidence", 0.5))
+            except Exception:
+                pass
+            try:
+                ans_m = re.search(r'"final_answer"\s*:\s*"([^"]+)"', res_text)
+                conf_m = re.search(r'"confidence"\s*:\s*([0-9.]+)', res_text)
+                ans = ans_m.group(1) if ans_m else default_ans
+                conf = float(conf_m.group(1)) if conf_m else 0.5
+                return ans, conf
+            except Exception:
+                return default_ans, 0.5
+
+        ans_neutral, conf_neutral = _parse_agent_json(neutral_res, initial_answer)
 
         aggressive_template = Template(aggressive_template_str).substitute(
             text=question, answer=initial_answer, eval_report=eval_report
         )
         aggressive_res = llava_inference(aggressive_template, video)
-        try:
-            aggr_parsed = json.loads(aggressive_res)
-            ans_aggressive = aggr_parsed["final_answer"]
-            conf_aggressive = float(aggr_parsed["confidence"])
-        except Exception:
-            ans_aggressive = None
-            conf_aggressive = 0.0
+        ans_aggressive, conf_aggressive = _parse_agent_json(aggressive_res, initial_answer)
 
         conservative_template = Template(conservative_template_str).substitute(
             text=question, answer=initial_answer, eval_report=eval_report
         )
         conservative_res = llava_inference(conservative_template, video)
-        try:
-            cons_parsed = json.loads(conservative_res)
-            ans_conservative = cons_parsed["final_answer"]
-            conf_conservative = float(cons_parsed["confidence"])
-        except Exception:
-            ans_conservative = None
-            conf_conservative = 0.0
+        ans_conservative, conf_conservative = _parse_agent_json(conservative_res, initial_answer)
 
         meta_template = Template(meta_agent_prompt_template).substitute(
             answer_conservative=ans_conservative,

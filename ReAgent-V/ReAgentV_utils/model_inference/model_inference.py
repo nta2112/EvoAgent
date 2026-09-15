@@ -34,19 +34,16 @@ def llava_inference(qs, video):
         cont = model.generate(
             input_ids,
             images=video,
-            modalities= ["video"],
+            modalities=["video"],
             do_sample=False,
-            temperature=0,
-            max_new_tokens=10480,
-            top_p=1.0,
+            max_new_tokens=4096,
             num_beams=1
         )
     else:
         cont = model.generate(
             input_ids,
             do_sample=False,
-            temperature=0,
-            max_new_tokens=10480,
+            max_new_tokens=4096,
         )
     
     text_outputs = tokenizer.batch_decode(cont, skip_special_tokens=True)[0].strip()
