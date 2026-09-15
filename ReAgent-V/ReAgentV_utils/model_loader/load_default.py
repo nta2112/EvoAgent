@@ -7,6 +7,9 @@ from transformers import (
     WhisperForConditionalGeneration
 )
 
+import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import torch
 
 from llava.model.builder import load_pretrained_model
@@ -313,6 +316,24 @@ def load_default(path_dict):
     model.encode_images = safe_encode_images
 
     model.eval()
+
+    # -------------------------------------------------------------------
+    # Tối ưu hóa bộ nhớ lm_head (Cắt giảm VRAM từ ~7.3GB xuống 608KB):
+    # Trong suy luận Video-LLM với chuỗi dài (10,000 - 25,000 tokens),
+    # generate() CHỈ cần logits của token cuối cùng x[:, -1:, :] để sinh từ.
+    # Chiếu toàn bộ 20,000 tokens qua lm_head và ép kiểu sang float32 sẽ ngốn
+    # > 7GB VRAM và gây CUDA OutOfMemoryError trên GPU T4 (15GB).
+    # -------------------------------------------------------------------
+    if hasattr(model, "lm_head"):
+        orig_lm_head_fwd = model.lm_head.forward
+
+        def memory_efficient_lm_head_forward(x, *args, **kwargs):
+            if not model.training and x.dim() == 3 and x.shape[1] > 1:
+                x = x[:, -1:, :]
+            return orig_lm_head_fwd(x, *args, **kwargs)
+
+        model.lm_head.forward = memory_efficient_lm_head_forward
+        print("✅ Đã kích hoạt memory-efficient lm_head (giảm 99.9% VRAM prefill logits)")
 
     # Chat template
     conv_template = "qwen_1_5"

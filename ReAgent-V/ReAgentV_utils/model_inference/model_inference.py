@@ -30,6 +30,8 @@ def llava_inference(qs, video):
         target_device = torch.device("cuda:0")
     input_ids = tokenizer_image_token(prompt_question, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).to(target_device)
     
+    torch.cuda.empty_cache()
+
     if video is not None:
         cont = model.generate(
             input_ids,
@@ -46,5 +48,7 @@ def llava_inference(qs, video):
             max_new_tokens=4096,
         )
     
+    torch.cuda.empty_cache()
+
     text_outputs = tokenizer.batch_decode(cont, skip_special_tokens=True)[0].strip()
     return text_outputs
