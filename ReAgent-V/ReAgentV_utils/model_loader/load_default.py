@@ -21,6 +21,26 @@ from llava.constants import (
 from llava.conversation import conv_templates, SeparatorStyle
 
 
+def _force_remove_all_hooks(module):
+    """
+    Xóa TOÀN BỘ accelerate hooks (_hf_hook) khỏi module và tất cả sub-modules.
+    Khác với remove_hook_from_module của accelerate, hàm này không raise exception
+    và không bị chặn bởi meta tensor.
+    """
+    for mod in module.modules():
+        if hasattr(mod, "_hf_hook"):
+            hf_hook = mod._hf_hook
+            # Khôi phục forward method gốc
+            old_fwd = getattr(hf_hook, "old_forward", None)
+            if old_fwd is not None and callable(old_fwd):
+                mod.forward = old_fwd
+            # Xóa hook attribute
+            try:
+                del mod._hf_hook
+            except Exception:
+                pass
+
+
 def load_default(path_dict):
     # Required keys in path_dict
     required_keys = [
@@ -74,7 +94,9 @@ def load_default(path_dict):
         max_memory=max_memory
     )
     
-    # Đảm bảo vision_tower và mm_projector không dính meta tensor hoặc hook lỗi của accelerate
+    # -------------------------------------------------------------------
+    # Bước 1: Load lại Vision Tower thật sự lên cuda:0 (không qua accelerate meta)
+    # -------------------------------------------------------------------
     vision_tower = model.get_vision_tower()
     if vision_tower is not None:
         try:
@@ -91,34 +113,64 @@ def load_default(path_dict):
             vt_model.requires_grad_(False)
             vision_tower.vision_tower = vt_model
             vision_tower.is_loaded = True
-            
-            # Gỡ bỏ hook của accelerate trên vision_tower và model.model.vision_tower
-            from accelerate.hooks import remove_hook_from_module
-            for m in [vision_tower, getattr(model.get_model(), "vision_tower", None)]:
-                if m is not None:
-                    try:
-                        remove_hook_from_module(m, recurse=True)
-                    except Exception:
-                        pass
+            print(f"✅ Vision tower loaded on cuda:0 (from: {vt_name})")
         except Exception as e:
-            print(f"Warning re-loading vision tower: {e}")
+            print(f"⚠️ Warning re-loading vision tower: {e}")
+    
+    # -------------------------------------------------------------------
+    # Bước 2: Force-xóa TẤT CẢ accelerate hooks khỏi vision_tower & mm_projector
+    # (Dùng hàm tùy chỉnh thay vì remove_hook_from_module để tránh lỗi meta tensor)
+    # -------------------------------------------------------------------
+    if vision_tower is not None:
+        _force_remove_all_hooks(vision_tower)
+        print("✅ Đã xóa tất cả accelerate hooks khỏi vision_tower")
 
-    # Patch model.encode_images để tránh accelerate hook chặn forward trên vision_tower
-    raw_encode_images = model.encode_images
+    mm_projector = getattr(model.get_model(), "mm_projector", None)
+    if mm_projector is not None:
+        _force_remove_all_hooks(mm_projector)
+        print("✅ Đã xóa tất cả accelerate hooks khỏi mm_projector")
+
+    # -------------------------------------------------------------------
+    # Bước 3: Patch encode_images để đảm bảo forward an toàn
+    # - Gọi type(vt).forward(vt, images) thay vì vt(images)
+    #   để bypass __call__ (nơi hook có thể được gắn lại)
+    # - Lấy device từ inner model đã load thật (không phải wrapper có thể còn meta)
+    # -------------------------------------------------------------------
     def safe_encode_images(images):
         vt = model.get_model().get_vision_tower()
-        # Đảm bảo images cùng device và dtype với vision_tower
-        vt_device = next(vt.parameters()).device
-        vt_dtype = next(vt.parameters()).dtype
-        images = images.to(device=vt_device, dtype=vt_dtype)
-        # Gọi thẳng vision_tower mà không qua hook của accelerate
-        image_features = vt(images)
+
+        # Lấy device từ inner vision model đã tải thật (vt.vision_tower)
+        # Không dùng next(vt.parameters()) vì wrapper có thể còn tham số meta
+        inner_vt = getattr(vt, "vision_tower", vt)
+        try:
+            # Tìm parameter đầu tiên KHÔNG phải meta để lấy device
+            vt_device = next(p.device for p in inner_vt.parameters() if not p.is_meta)
+        except StopIteration:
+            vt_device = torch.device("cuda:0")
+
+        images = images.to(device=vt_device, dtype=torch.float16)
+
+        # Gọi class-level forward để bypass hook trên vt.__call__
+        # type(vt).forward(vt, images) = SigLipVisionTower.forward(vt, images)
+        # bỏ qua _hf_hook có thể vẫn còn trên __call__
+        with torch.no_grad():
+            image_features = type(vt).forward(vt, images)
+
         proj = model.get_model().mm_projector
-        proj_device = next(proj.parameters()).device
-        proj_dtype = next(proj.parameters()).dtype
-        image_features = image_features.to(device=proj_device, dtype=proj_dtype)
-        image_features = proj(image_features)
+        # Tìm device của mm_projector (tránh meta)
+        try:
+            proj_device = next(p.device for p in proj.parameters() if not p.is_meta)
+        except StopIteration:
+            proj_device = vt_device
+
+        image_features = image_features.to(device=proj_device, dtype=torch.float16)
+
+        # Gọi class-level forward của mm_projector để bypass hook
+        with torch.no_grad():
+            image_features = type(proj).forward(proj, image_features)
+
         return image_features
+
     model.encode_images = safe_encode_images
 
     model.eval()
