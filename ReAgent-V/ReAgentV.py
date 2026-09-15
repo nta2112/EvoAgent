@@ -112,8 +112,16 @@ class ReAgentV:
         max_frames_num = len(key_frames)
         raw_video = [f for f in frames]
 
-        vision_tower = self.model.get_vision_tower() if hasattr(self.model, "get_vision_tower") else None
-        dev = vision_tower.device if (vision_tower is not None and hasattr(vision_tower, "device") and not getattr(vision_tower, "is_meta", False)) else next(self.model.parameters()).device
+        # Tìm device CUDA thật sự (không phải meta) từ model parameters
+        # Bất kể vision_tower hay LLM đặt ở đâu, luôn ưu tiên cuda:0
+        try:
+            dev = next(
+                p.device for p in self.model.parameters()
+                if not p.is_meta and p.device.type == "cuda"
+            )
+        except StopIteration:
+            dev = torch.device("cuda:0")
+
         video_tensor = (
             self.image_processor.preprocess(key_frames, return_tensors="pt")["pixel_values"]
             .to(dev, dtype=torch.float16)

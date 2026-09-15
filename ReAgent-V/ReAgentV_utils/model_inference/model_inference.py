@@ -19,7 +19,14 @@ def llava_inference(qs, video):
     conv.append_message(conv.roles[0], question)
     conv.append_message(conv.roles[1], None)
     prompt_question = conv.get_prompt()
-    target_device = model.device if hasattr(model, "device") else next(model.parameters()).device
+    # Tìm device CUDA thật sự (không phải meta) để đặt input_ids
+    try:
+        target_device = next(
+            p.device for p in model.parameters()
+            if not p.is_meta and p.device.type == "cuda"
+        )
+    except StopIteration:
+        target_device = torch.device("cuda:0")
     input_ids = tokenizer_image_token(prompt_question, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).to(target_device)
     
     if video is not None:
