@@ -112,7 +112,8 @@ class ReAgentV:
         max_frames_num = len(key_frames)
         raw_video = [f for f in frames]
 
-        dev = next(self.model.parameters()).device
+        vision_tower = self.model.get_vision_tower() if hasattr(self.model, "get_vision_tower") else None
+        dev = vision_tower.device if (vision_tower is not None and hasattr(vision_tower, "device") and not getattr(vision_tower, "is_meta", False)) else next(self.model.parameters()).device
         video_tensor = (
             self.image_processor.preprocess(key_frames, return_tensors="pt")["pixel_values"]
             .to(dev, dtype=torch.float16)

@@ -73,6 +73,19 @@ def load_default(path_dict):
         attn_implementation=attn_impl,
         overwrite_config=overwrite_config
     )
+    
+    # Đảm bảo vision_tower được nạp dữ liệu thật lên GPU, tránh lỗi meta tensor của accelerate
+    vision_tower = model.get_vision_tower()
+    if vision_tower is not None:
+        if not getattr(vision_tower, "is_loaded", False):
+            vision_tower.load_model(device_map=llava_device_map)
+        
+        # Nếu vision_tower có bất kỳ tham số nào ở device 'meta', chuyển sang GPU thực
+        for p in vision_tower.parameters():
+            if p.is_meta:
+                vision_tower.to(device="cuda:0", dtype=torch_dtype)
+                break
+
     model.eval()
 
     # Chat template
