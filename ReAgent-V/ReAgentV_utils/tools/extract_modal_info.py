@@ -42,7 +42,10 @@ def retrieve_modal_info(video_path, text, frames, raw_video, clip_model, clip_pr
 
     if USE_DET:
         # Xử lý theo mini-batch để không bao giờ bị tràn VRAM
-        clip_device = clip_model.device
+        try:
+            clip_device = next(clip_model.parameters()).device
+        except Exception:
+            clip_device = getattr(clip_model, "device", torch.device("cuda:0"))
         clip_features_list = []
         batch_size = 16
         with torch.no_grad():
@@ -111,8 +114,15 @@ def retrieve_modal_info(video_path, text, frames, raw_video, clip_model, clip_pr
                    f"{cot_json_instruction}"
     try:
         json_request = llava_inference(retrieve_pmt, None)
-        request_json = json.loads(json_request)
-    except:
+        import re
+        cleaned = re.sub(r"^```(?:json)?\s*", "", json_request.strip(), flags=re.MULTILINE)
+        cleaned = re.sub(r"\s*```$", "", cleaned, flags=re.MULTILINE).strip()
+        try:
+            request_json = json.loads(cleaned)
+        except Exception:
+            m = re.search(r"\{.*?\}", json_request, re.DOTALL)
+            request_json = json.loads(m.group(0)) if m else {}
+    except Exception:
         request_json = {}
 
     query = [text]
@@ -123,16 +133,29 @@ def retrieve_modal_info(video_path, text, frames, raw_video, clip_model, clip_pr
             request_det = request_json.get("DET", None)
             request_det = filter_keywords(request_det)
             clip_text = ["A picture of " + txt for txt in request_det] if request_det else ["A picture of object"]
-        except:
+        except Exception:
             clip_text = ["A picture of object"]
 
-        clip_inputs = clip_processor(text=clip_text, return_tensors="pt", padding=True, truncation=True).to(clip_model.device)
+        try:
+            clip_device = next(clip_model.parameters()).device
+        except Exception:
+            clip_device = getattr(clip_model, "device", torch.device("cuda:0"))
+
+        clip_inputs = clip_processor(text=clip_text, return_tensors="pt", padding=True, truncation=True)
+        clip_inputs = {k: v.to(clip_device) for k, v in clip_inputs.items()}
+
         with torch.no_grad():
             text_features = clip_model.get_text_features(**clip_inputs)
-            similarities = (clip_img_feats @ text_features.T).squeeze(0).mean(1).cpu()
+            sim_matrix = clip_img_feats @ text_features.T
+            if sim_matrix.dim() == 1:
+                similarities = sim_matrix.cpu()
+            else:
+                similarities = sim_matrix.mean(dim=-1).cpu()
             similarities = np.array(similarities, dtype=np.float64)
+            sim_sum = np.sum(similarities)
             alpha = beta * (len(similarities) / 16)
-            similarities = similarities * alpha / np.sum(similarities)
+            if sim_sum > 0:
+                similarities = similarities * alpha / sim_sum
 
         del clip_inputs, clip_img_feats, text_features
         torch.cuda.empty_cache()

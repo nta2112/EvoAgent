@@ -29,12 +29,14 @@ def llava_inference(qs, video):
     except StopIteration:
         target_device = torch.device("cuda:0")
     input_ids = tokenizer_image_token(prompt_question, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).to(target_device)
+    attention_mask = torch.ones_like(input_ids, device=target_device)
     
     torch.cuda.empty_cache()
 
     if video is not None:
         cont = model.generate(
             input_ids,
+            attention_mask=attention_mask,
             images=video,
             modalities=["video"],
             do_sample=False,
@@ -44,10 +46,13 @@ def llava_inference(qs, video):
     else:
         cont = model.generate(
             input_ids,
+            attention_mask=attention_mask,
             do_sample=False,
             max_new_tokens=4096,
         )
     
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     torch.cuda.empty_cache()
 
     text_outputs = tokenizer.batch_decode(cont, skip_special_tokens=True)[0].strip()

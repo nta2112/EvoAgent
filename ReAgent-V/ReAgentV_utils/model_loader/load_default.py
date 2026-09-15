@@ -329,11 +329,54 @@ def load_default(path_dict):
 
         def memory_efficient_lm_head_forward(x, *args, **kwargs):
             if not model.training and x.dim() == 3 and x.shape[1] > 1:
-                x = x[:, -1:, :]
+                x = x[:, -1:, :].contiguous()
             return orig_lm_head_fwd(x, *args, **kwargs)
 
         model.lm_head.forward = memory_efficient_lm_head_forward
         print("✅ Đã kích hoạt memory-efficient lm_head (giảm 99.9% VRAM prefill logits)")
+
+    # -------------------------------------------------------------------
+    # Patch model.generate:
+    # 1. Pure text (images is None): Chuyển tiếp trực tiếp tới Qwen2ForCausalLM.generate
+    #    với input_ids và attention_mask đầy đủ. Tránh bug upstream của LLaVA khi tự ý
+    #    chuyển input_ids thành inputs_embeds mà không truyền attention_mask/position_ids,
+    #    gây lỗi RoPE out-of-bounds và illegal memory access trong CUDA SDPA kernel.
+    # 2. Multimodal (images is not None): Dùng generate gốc của LLaVA.
+    # -------------------------------------------------------------------
+    orig_generate = model.generate
+
+    def safe_generate(*args, **kwargs):
+        images = kwargs.get("images", None)
+        if images is None and len(args) > 1:
+            images = args[1]
+
+        inputs = kwargs.pop("inputs", None)
+        if inputs is None and len(args) > 0:
+            inputs = args[0]
+            remaining_args = args[1:]
+        else:
+            remaining_args = args
+
+        if kwargs.get("attention_mask", None) is None:
+            if inputs is not None and isinstance(inputs, torch.Tensor):
+                kwargs["attention_mask"] = torch.ones_like(inputs, device=inputs.device)
+
+        if images is None:
+            kwargs.pop("images", None)
+            kwargs.pop("image_sizes", None)
+            kwargs.pop("modalities", None)
+            try:
+                from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM
+                return Qwen2ForCausalLM.generate(model, inputs=inputs, **kwargs)
+            except Exception:
+                from transformers.generation import GenerationMixin
+                return GenerationMixin.generate(model, inputs=inputs, **kwargs)
+        else:
+            if inputs is not None:
+                return orig_generate(inputs, *remaining_args, **kwargs)
+            return orig_generate(*remaining_args, **kwargs)
+
+    model.generate = safe_generate
 
     # Chat template
     conv_template = "qwen_1_5"

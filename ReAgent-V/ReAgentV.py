@@ -165,9 +165,12 @@ class ReAgentV:
        
         return evaluate_answer(question=question, answer=initial_answer, context_info=context_info, video=video)
 
-    def generate_eval_report(self, question: str, initial_answer: str, context_info: dict, video) -> str:
+    def generate_eval_report(self, question: str, initial_answer: str, context_info, video) -> str:
        
-        context_str = json.dumps(context_info, indent=2)
+        if isinstance(context_info, str):
+            context_str = context_info
+        else:
+            context_str = json.dumps(context_info, indent=2)
         critic_prompt = eval_reward_prompt_template.format(
             question=question,
             context=context_str,
