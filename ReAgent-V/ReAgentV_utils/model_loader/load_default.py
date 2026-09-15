@@ -361,6 +361,16 @@ def load_default(path_dict):
             if inputs is not None and isinstance(inputs, torch.Tensor):
                 kwargs["attention_mask"] = torch.ones_like(inputs, device=inputs.device)
 
+        # Xóa sampling flags khi do_sample=False để tránh UserWarnings từ transformers
+        if kwargs.get("do_sample") is False:
+            kwargs.pop("temperature", None)
+            kwargs.pop("top_p", None)
+            kwargs.pop("top_k", None)
+            if hasattr(model, "generation_config") and model.generation_config is not None:
+                model.generation_config.temperature = None
+                model.generation_config.top_p = None
+                model.generation_config.top_k = None
+
         if images is None:
             kwargs.pop("images", None)
             kwargs.pop("image_sizes", None)

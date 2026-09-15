@@ -1,6 +1,12 @@
+import os
+import torch
+import torchaudio
+import ffmpeg
+
 def extract_audio(video_path, audio_path):
     if not os.path.exists(audio_path):
-        ffmpeg.input(video_path).output(audio_path, acodec='pcm_s16le', ac=1, ar='16k').run()
+        os.makedirs(os.path.dirname(os.path.abspath(audio_path)), exist_ok=True)
+        ffmpeg.input(video_path).output(audio_path, acodec='pcm_s16le', ac=1, ar='16k').run(quiet=True)
 
 
 

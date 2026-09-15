@@ -61,15 +61,23 @@ def retrieve_modal_info(video_path, text, frames, raw_video, clip_model, clip_pr
 
     if USE_ASR:
         txt_path = os.path.join("restore/audio", os.path.basename(video_path).split(".")[0] + ".txt")
+        os.makedirs(os.path.dirname(txt_path), exist_ok=True)
         if os.path.exists(txt_path):
-            with open(txt_path, 'r', encoding='utf-8') as f:
-                asr_docs_total = f.readlines()
+            try:
+                with open(txt_path, 'r', encoding='utf-8') as f:
+                    asr_docs_total = f.readlines()
+            except Exception:
+                asr_docs_total = []
         else:
-            audio_path = txt_path.replace(".txt", ".wav")
-            asr_docs_total = get_asr_docs(video_path, audio_path)
-            with open(txt_path, 'w', encoding='utf-8') as f:
-                for doc in asr_docs_total:
-                    f.write(doc + '\n')
+            try:
+                audio_path = txt_path.replace(".txt", ".wav")
+                asr_docs_total = get_asr_docs(video_path, audio_path)
+                with open(txt_path, 'w', encoding='utf-8') as f:
+                    for doc in asr_docs_total:
+                        f.write(str(doc) + '\n')
+            except Exception as e:
+                print(f"⚠️ Trích xuất âm thanh ASR không thành công (video có thể không có âm thanh): {e}")
+                asr_docs_total = []
 
     det_docs, ocr_docs, asr_docs = [], [], []
     det_top_idx = []

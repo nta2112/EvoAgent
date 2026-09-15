@@ -1,4 +1,6 @@
+import os
 import numpy as np
+from PIL import Image
 from decord import VideoReader, cpu
 
 def load_video_frames(video_path, fps=1, force_sample=False):
@@ -23,9 +25,11 @@ def load_video_frames(video_path, fps=1, force_sample=False):
 
 def save_frames(frames, file_name):
     file_paths = []
+    dir_path = f'restore/{file_name}'
+    os.makedirs(dir_path, exist_ok=True)
     for i, frame in enumerate(frames):
         img = Image.fromarray(frame)
-        file_path = f'restore/{file_name}/frame_{i}.png'
+        file_path = f'{dir_path}/frame_{i}.png'
         img.save(file_path)
         file_paths.append(file_path)
     return file_paths
