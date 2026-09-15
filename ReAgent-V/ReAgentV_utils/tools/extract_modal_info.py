@@ -41,11 +41,17 @@ def retrieve_modal_info(video_path, text, frames, raw_video, clip_model, clip_pr
     USE_DET = res.get("USE_DET")
 
     if USE_DET:
-        video_tensor = []
-        for frame in raw_video:
-            processed = clip_processor(images=frame, return_tensors="pt")["pixel_values"].to(clip_model.device, dtype=torch.float16)
-            video_tensor.append(processed.squeeze(0))
-        video_tensor = torch.stack(video_tensor, dim=0)
+        # Xử lý theo mini-batch để không bao giờ bị tràn VRAM
+        clip_device = clip_model.device
+        clip_features_list = []
+        batch_size = 16
+        with torch.no_grad():
+            for i in range(0, len(raw_video), batch_size):
+                batch_frames = raw_video[i:i + batch_size]
+                processed = clip_processor(images=batch_frames, return_tensors="pt")["pixel_values"].to(clip_device, dtype=torch.float16)
+                feats = clip_model.get_image_features(processed)
+                clip_features_list.append(feats)
+        clip_img_feats = torch.cat(clip_features_list, dim=0)
 
     if USE_OCR:
         ocr_docs_total = get_ocr_docs(frames)
@@ -121,7 +127,6 @@ def retrieve_modal_info(video_path, text, frames, raw_video, clip_model, clip_pr
             clip_text = ["A picture of object"]
 
         clip_inputs = clip_processor(text=clip_text, return_tensors="pt", padding=True, truncation=True).to(clip_model.device)
-        clip_img_feats = clip_model.get_image_features(video_tensor)
         with torch.no_grad():
             text_features = clip_model.get_text_features(**clip_inputs)
             similarities = (clip_img_feats @ text_features.T).squeeze(0).mean(1).cpu()

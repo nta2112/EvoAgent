@@ -112,10 +112,10 @@ class ReAgentV:
         max_frames_num = len(key_frames)
         raw_video = [f for f in frames]
 
+        dev = next(self.model.parameters()).device
         video_tensor = (
             self.image_processor.preprocess(key_frames, return_tensors="pt")["pixel_values"]
-            .cuda()
-            .bfloat16()
+            .to(dev, dtype=torch.float16)
         )
         video_for_model = [video_tensor]
 
