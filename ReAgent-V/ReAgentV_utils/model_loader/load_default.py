@@ -64,20 +64,19 @@ def load_default(path_dict):
     max_memory = path_dict.get("max_memory", None)
 
     tokenizer, model, image_processor, max_length = load_pretrained_model(
-        path_dict["llava_model_path"],
-        None,
-        llava_model_name,
-        torch_dtype=torch_dtype,
+        model_path=path_dict["llava_model_path"],
+        model_base=None,
+        model_name=llava_model_name,
         device_map=llava_device_map,
-        max_memory=max_memory,
+        torch_dtype="float16",
         attn_implementation=attn_impl,
-        overwrite_config=overwrite_config
+        overwrite_config=overwrite_config,
+        max_memory=max_memory
     )
     
-    # Đảm bảo vision_tower được nạp dữ liệu thật lên cuda:0 (SigLIP ~1.5GB không tốn nhiều VRAM)
+    # Đảm bảo vision_tower và mm_projector không dính meta tensor hoặc hook lỗi của accelerate
     vision_tower = model.get_vision_tower()
     if vision_tower is not None:
-        # Tải thẳng model weights lên cuda:0 thay vì để accelerate biến thành meta tensor
         try:
             from transformers import SigLipVisionModel
             vt_name = getattr(vision_tower, "vision_tower_name", "google/siglip-so400m-patch14-384")
@@ -93,11 +92,34 @@ def load_default(path_dict):
             vision_tower.vision_tower = vt_model
             vision_tower.is_loaded = True
             
-            # Gỡ bỏ hook của accelerate trên vision_tower để tránh lỗi meta tensor
+            # Gỡ bỏ hook của accelerate trên vision_tower và model.model.vision_tower
             from accelerate.hooks import remove_hook_from_module
-            remove_hook_from_module(vision_tower, recurse=True)
+            for m in [vision_tower, getattr(model.get_model(), "vision_tower", None)]:
+                if m is not None:
+                    try:
+                        remove_hook_from_module(m, recurse=True)
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"Warning re-loading vision tower: {e}")
+
+    # Patch model.encode_images để tránh accelerate hook chặn forward trên vision_tower
+    raw_encode_images = model.encode_images
+    def safe_encode_images(images):
+        vt = model.get_model().get_vision_tower()
+        # Đảm bảo images cùng device và dtype với vision_tower
+        vt_device = next(vt.parameters()).device
+        vt_dtype = next(vt.parameters()).dtype
+        images = images.to(device=vt_device, dtype=vt_dtype)
+        # Gọi thẳng vision_tower mà không qua hook của accelerate
+        image_features = vt(images)
+        proj = model.get_model().mm_projector
+        proj_device = next(proj.parameters()).device
+        proj_dtype = next(proj.parameters()).dtype
+        image_features = image_features.to(device=proj_device, dtype=proj_dtype)
+        image_features = proj(image_features)
+        return image_features
+    model.encode_images = safe_encode_images
 
     model.eval()
 
