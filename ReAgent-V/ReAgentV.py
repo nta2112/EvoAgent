@@ -487,7 +487,10 @@ class ReAgentV:
                 verdict = "PARTIAL_MATCH"
 
             reranked.append((video_path, rel_score, verdict))
-            torch.cuda.empty_cache()
+            del vid_tensor, combined_tensor, combined_input
+
+        # Single cache cleanup after all candidates are scored
+        torch.cuda.empty_cache()
 
         # Sort by relevance_score descending
         reranked.sort(key=lambda x: x[1], reverse=True)
@@ -529,6 +532,9 @@ class ReAgentV:
         )
         critic_raw = llava_inference(prompt, combined_input)
         scalar_reward = _extract_scalar_reward(critic_raw)
+
+        del combined, combined_input, vid_tensor, q_img_tensor
+        torch.cuda.empty_cache()
         return scalar_reward, critic_raw
 
     def adaptive_covr_retrieval(

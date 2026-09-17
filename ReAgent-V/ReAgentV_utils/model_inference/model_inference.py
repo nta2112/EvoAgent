@@ -30,8 +30,6 @@ def llava_inference(qs, video):
         target_device = torch.device("cuda:0")
     input_ids = tokenizer_image_token(prompt_question, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).to(target_device)
     attention_mask = torch.ones_like(input_ids, device=target_device)
-    
-    torch.cuda.empty_cache()
 
     if video is not None:
         cont = model.generate(
