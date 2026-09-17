@@ -14,7 +14,6 @@ import networkx as nx
 from PIL import Image
 from string import Template
 
-from ReAgentV_utils.tools.extract_modal_info import retrieve_modal_info
 from ReAgentV_utils.model_inference.model_inference import tokenizer as _tokenizer, model as _model
 from ReAgentV_utils.prompt_builder.prompt import (
     tool_retrieval_prompt_template,
@@ -29,17 +28,6 @@ from ReAgentV_utils.prompt_builder.covr_prompt import (
     covr_critic_prompt_template,
     covr_query_expansion_template,
 )
-from ReAgentV_utils.tools.scene_graph_tools.det_utils import (
-    save_frames,
-    calculate_xmax_ymax,
-    calculate_spatial_relations,
-    relation_to_text,
-    generate_scene_graph_description,
-    get_det_docs as _get_det_docs,
-    det_preprocess
-)
-from ReAgentV_utils.tools.audio_tools.asr_utils import get_asr_docs
-from ReAgentV_utils.tools.ocr_tools.ocr_utils import get_ocr_docs
 from ReAgentV_utils.frame_selection_ecrs.ECRS_frame_selection import select_keyframes
 from ReAgentV_utils.video_processor.process_video import load_video_frames
 from ReAgentV_utils.video_processor.covr_loader import extract_middle_frame
@@ -150,7 +138,7 @@ class ReAgentV:
         clip_model,
         clip_processor,
     ):
-       
+        from ReAgentV_utils.tools.extract_modal_info import retrieve_modal_info
         return retrieve_modal_info(
             video_path=video_path,
             text=question,
