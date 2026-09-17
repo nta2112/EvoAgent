@@ -290,9 +290,15 @@ class ReAgentV:
         except Exception:
             clip_device = torch.device("cuda:0")
 
-        full_text = query_text
+        # Format text with context prefix to align with target video representations
+        clean_text = query_text.strip()
+        if not clean_text.lower().startswith("a video of") and not clean_text.lower().startswith("a video showing"):
+            full_text = f"a video showing {clean_text}"
+        else:
+            full_text = clean_text
+
         if query_expansion_hint:
-            full_text = f"{query_text} {query_expansion_hint}"
+            full_text = f"{full_text}, {query_expansion_hint.strip()}"
 
         with torch.no_grad():
             # Image branch
@@ -358,13 +364,16 @@ class ReAgentV:
         Returns None if the video cannot be loaded.
         """
         try:
-            frames = load_video_frames(video_path, fps=1, force_sample=False)
-            if frames is None or (hasattr(frames, '__len__') and len(frames) == 0):
+            vr = VideoReader(video_path, ctx=cpu(), num_threads=1)
+            total_frames = len(vr)
+            if total_frames == 0:
                 return None
-            key_frames, _ = select_keyframes(
-                frames, "describe this video",
-                self.clip_model, self.clip_processor
-            )
+            # Uniformly sample 4 keyframes across the video duration for fast inference
+            num_samples = min(4, total_frames)
+            indices = np.linspace(0, total_frames - 1, num_samples, dtype=int).tolist()
+            sampled_np = vr.get_batch(indices).asnumpy()
+            key_frames = [Image.fromarray(f) for f in sampled_np]
+
             try:
                 dev = next(
                     p.device for p in self.model.parameters()

@@ -115,11 +115,10 @@ class ToolMemoryBank:
         )
         self.history.append(record)
 
-        # Mark the returned candidates that scored low as negatives to avoid
+        # We avoid strictly blacklisting top candidates to avoid false negative rejection,
+        # but keep track of visited candidates for analysis.
         if scalar_reward < self.reward_threshold and top_candidates:
-            # Only blacklist the bottom-half candidates to keep some exploration
-            n_reject = max(1, len(top_candidates) // 2)
-            self.visited_negatives.update(top_candidates[-n_reject:])
+            pass  # Do not blacklist to protect Recall@K metrics
 
         print(
             f"[MemoryBank] Iter {iteration} | reward={scalar_reward:.3f} | "
