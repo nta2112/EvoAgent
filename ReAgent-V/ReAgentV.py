@@ -14,7 +14,7 @@ import networkx as nx
 from PIL import Image
 from string import Template
 
-from init_modules import *
+from ReAgentV_utils.tools.extract_modal_info import retrieve_modal_info
 from ReAgentV_utils.model_inference.model_inference import tokenizer as _tokenizer, model as _model
 from ReAgentV_utils.prompt_builder.prompt import (
     tool_retrieval_prompt_template,
