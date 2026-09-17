@@ -13,6 +13,7 @@ import numpy as np
 import networkx as nx
 from PIL import Image
 from string import Template
+from decord import VideoReader, cpu
 
 from ReAgentV_utils.model_inference.model_inference import tokenizer as _tokenizer, model as _model
 from ReAgentV_utils.prompt_builder.prompt import (
@@ -557,7 +558,11 @@ class ReAgentV:
                     expansion_prompt = covr_query_expansion_template.format(
                         edit_prompt=query_text
                     )
-                    hint = llava_inference(expansion_prompt, None).strip()[:100]
+                    raw_hint = llava_inference(expansion_prompt, None).strip()
+                    # Clean any chat template artifact (e.g. system\n...assistant\n)
+                    if "assistant\n" in raw_hint:
+                        raw_hint = raw_hint.split("assistant\n")[-1].strip()
+                    hint = raw_hint.replace("\n", " ")[:100].strip()
                     print(f"[ReAgentV] Query expanded: '{hint}'")
                 except Exception:
                     pass
