@@ -369,8 +369,8 @@ class ReAgentV:
             total_frames = len(vr)
             if total_frames == 0:
                 return None
-            # Uniformly sample 4 keyframes across the video duration for fast inference
-            num_samples = min(4, total_frames)
+            # Uniformly sample 2 keyframes across the video duration for fast inference
+            num_samples = min(2, total_frames)
             indices = np.linspace(0, total_frames - 1, num_samples, dtype=int).tolist()
             sampled_np = vr.get_batch(indices).asnumpy()
             key_frames = [Image.fromarray(f) for f in sampled_np]

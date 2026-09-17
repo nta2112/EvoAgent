@@ -40,7 +40,7 @@ def llava_inference(qs, video):
             images=video,
             modalities=["video"],
             do_sample=False,
-            max_new_tokens=128,
+            max_new_tokens=1000,
             num_beams=1
         )
     else:
@@ -48,7 +48,7 @@ def llava_inference(qs, video):
             input_ids,
             attention_mask=attention_mask,
             do_sample=False,
-            max_new_tokens=128,
+            max_new_tokens=1000,
         )
 
     text_outputs = tokenizer.batch_decode(cont, skip_special_tokens=True)[0].strip()
