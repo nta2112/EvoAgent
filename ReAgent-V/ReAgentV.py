@@ -253,9 +253,17 @@ class ReAgentV:
     # CoVR: Composed Video Retrieval Methods
     # ===================================================================
 
-    def load_corpus_index(self, index_path: str) -> Tuple[torch.Tensor, List[str]]:
+    def load_corpus_index(
+        self, index_path: str, video_base_dir: Optional[str] = None
+    ) -> Tuple[torch.Tensor, List[str]]:
         """
         Load the pre-computed CLIP corpus index built by covr_indexer.py.
+
+        Args:
+            index_path     : Path to covr_corpus_index.pt.
+            video_base_dir : Optional root directory of video dataset. If provided or if
+                             the indexed paths do not exist, paths are automatically
+                             remapped to match video_base_dir or existing files on disk.
 
         Returns:
             embeddings  : Tensor [N, D] of L2-normalised CLIP image features.
@@ -263,7 +271,31 @@ class ReAgentV:
         """
         data = torch.load(index_path, map_location="cpu")
         embeddings  = data["embeddings"]   # [N, D]
-        video_paths = data["video_paths"]  # List[str]
+        video_paths = list(data["video_paths"])  # List[str]
+
+        # Auto-remap paths if video_base_dir is specified or if paths are missing
+        if video_paths and (video_base_dir or not os.path.exists(video_paths[0])):
+            remapped_paths = []
+            for p in video_paths:
+                norm_p = p.replace("\\", "/")
+                # Extract relative video path e.g. "subfolder/video_id.mp4"
+                parts = norm_p.split("/")
+                rel = "/".join(parts[-2:]) if len(parts) >= 2 else os.path.basename(norm_p)
+                
+                if video_base_dir:
+                    candidate = os.path.join(video_base_dir, rel)
+                else:
+                    candidate = p
+
+                if not os.path.exists(candidate) and video_base_dir:
+                    # Fallback check if rel matches direct filename
+                    candidate_direct = os.path.join(video_base_dir, os.path.basename(norm_p))
+                    if os.path.exists(candidate_direct):
+                        candidate = candidate_direct
+
+                remapped_paths.append(candidate)
+            video_paths = remapped_paths
+
         print(f"[ReAgentV] Corpus index loaded: {len(video_paths):,} videos.")
         return embeddings, video_paths
 

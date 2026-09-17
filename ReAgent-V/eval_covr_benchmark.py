@@ -83,7 +83,7 @@ def main():
         "llava_cache_dir":    "models",
     }
     qa_system = ReAgentV.load_default(path_dict)
-    corpus_embeddings, corpus_paths = qa_system.load_corpus_index(args.index_path)
+    corpus_embeddings, corpus_paths = qa_system.load_corpus_index(args.index_path, video_base_dir=args.video_dir)
 
     # ------------------------------------------------------------------
     # 2. Load annotations
@@ -112,6 +112,7 @@ def main():
             continue
 
         gt_norm = os.path.normpath(gt_video_path)
+        gt_base = os.path.basename(gt_norm)
 
         # ---- CLIP-only Coarse retrieval (Stage 1 only, no agent) ----
         clip_results = qa_system.coarse_search(
@@ -121,7 +122,11 @@ def main():
             alpha=args.alpha,
         )
         clip_paths = [os.path.normpath(r[0]) for r in clip_results]
-        clip_rank = (clip_paths.index(gt_norm) + 1) if gt_norm in clip_paths else None
+        if gt_norm in clip_paths:
+            clip_rank = clip_paths.index(gt_norm) + 1
+        else:
+            clip_bases = [os.path.basename(p) for p in clip_paths]
+            clip_rank = (clip_bases.index(gt_base) + 1) if gt_base in clip_bases else None
         clip_ranks.append(clip_rank)
 
         # ---- Full Agent Retrieval (Stage 1 + Stage 2 + Adaptive Loop) ----
@@ -136,7 +141,11 @@ def main():
             reward_threshold=args.reward_threshold,
         )
         agent_paths = [os.path.normpath(r[0]) for r in agent_results]
-        agent_rank = (agent_paths.index(gt_norm) + 1) if gt_norm in agent_paths else None
+        if gt_norm in agent_paths:
+            agent_rank = agent_paths.index(gt_norm) + 1
+        else:
+            agent_bases = [os.path.basename(p) for p in agent_paths]
+            agent_rank = (agent_bases.index(gt_base) + 1) if gt_base in agent_bases else None
         agent_ranks.append(agent_rank)
 
         per_query_results.append({
