@@ -4,10 +4,14 @@ import pickle
 import socket
 import ast
 import copy
+from typing import List, Optional, Tuple, Dict, Any
 
+import cv2
 import torch
+import torch.nn.functional as F
 import numpy as np
 import networkx as nx
+from PIL import Image
 from string import Template
 
 from init_modules import *
@@ -19,6 +23,11 @@ from ReAgentV_utils.prompt_builder.prompt import (
     neutral_template_str,
     aggressive_template_str,
     meta_agent_prompt_template
+)
+from ReAgentV_utils.prompt_builder.covr_prompt import (
+    covr_rerank_prompt_template,
+    covr_critic_prompt_template,
+    covr_query_expansion_template,
 )
 from ReAgentV_utils.tools.scene_graph_tools.det_utils import (
     save_frames,
@@ -33,10 +42,12 @@ from ReAgentV_utils.tools.audio_tools.asr_utils import get_asr_docs
 from ReAgentV_utils.tools.ocr_tools.ocr_utils import get_ocr_docs
 from ReAgentV_utils.frame_selection_ecrs.ECRS_frame_selection import select_keyframes
 from ReAgentV_utils.video_processor.process_video import load_video_frames
+from ReAgentV_utils.video_processor.covr_loader import extract_middle_frame
 from ReAgentV_utils.prompt_builder.build_multimodal_prompt import build_multimodal_prompt
 from ReAgentV_utils.model_loader.load_default import load_default
 from ReAgentV_utils.model_inference.model_inference import llava_inference
 from ReAgentV_utils.critical_question_generator.generate_critical_question import evaluate_answer
+from ReAgentV_utils.memory.memory_bank import ToolMemoryBank, _extract_scalar_reward
 
 
 class ReAgentV:
@@ -249,4 +260,364 @@ class ReAgentV:
         }
         return final_model_answer
 
- 
+    # ===================================================================
+    # CoVR: Composed Video Retrieval Methods
+    # ===================================================================
+
+    def load_corpus_index(self, index_path: str) -> Tuple[torch.Tensor, List[str]]:
+        """
+        Load the pre-computed CLIP corpus index built by covr_indexer.py.
+
+        Returns:
+            embeddings  : Tensor [N, D] of L2-normalised CLIP image features.
+            video_paths : List of N absolute video file paths.
+        """
+        data = torch.load(index_path, map_location="cpu")
+        embeddings  = data["embeddings"]   # [N, D]
+        video_paths = data["video_paths"]  # List[str]
+        print(f"[ReAgentV] Corpus index loaded: {len(video_paths):,} videos.")
+        return embeddings, video_paths
+
+    def encode_covr_query(
+        self,
+        query_image: Image.Image,
+        query_text: str,
+        alpha: float = 0.5,
+        query_expansion_hint: str = "",
+    ) -> torch.Tensor:
+        """
+        Encode a composed query (Image + Text) into a single CLIP embedding.
+
+        Args:
+            query_image           : PIL Image (middle frame of reference video).
+            query_text            : Edit instruction / prompt text.
+            alpha                 : Weight for image feature (1-alpha goes to text).
+            query_expansion_hint  : Optional extra keywords appended to query_text.
+
+        Returns:
+            query_feat : Tensor [1, D] L2-normalised composed query embedding.
+        """
+        try:
+            clip_device = next(self.clip_model.parameters()).device
+        except Exception:
+            clip_device = torch.device("cuda:0")
+
+        full_text = query_text
+        if query_expansion_hint:
+            full_text = f"{query_text} {query_expansion_hint}"
+
+        with torch.no_grad():
+            # Image branch
+            img_inputs = self.clip_processor(
+                images=query_image, return_tensors="pt"
+            )["pixel_values"].to(clip_device, dtype=torch.float16)
+            img_feat = self.clip_model.get_image_features(img_inputs)  # [1, D]
+            img_feat = F.normalize(img_feat.float(), dim=-1)
+
+            # Text branch
+            txt_inputs = self.clip_processor(
+                text=[full_text], return_tensors="pt",
+                padding=True, truncation=True, max_length=77,
+            )
+            txt_inputs = {k: v.to(clip_device) for k, v in txt_inputs.items()}
+            txt_feat = self.clip_model.get_text_features(**txt_inputs)   # [1, D]
+            txt_feat = F.normalize(txt_feat.float(), dim=-1)
+
+        # Compose and re-normalise
+        query_feat = F.normalize(
+            alpha * img_feat + (1.0 - alpha) * txt_feat, dim=-1
+        )  # [1, D]
+        return query_feat.cpu()
+
+    def coarse_search(
+        self,
+        query_image: Image.Image,
+        query_text: str,
+        corpus_embeddings: torch.Tensor,
+        corpus_paths: List[str],
+        top_n: int = 20,
+        alpha: float = 0.5,
+        query_expansion_hint: str = "",
+        exclude_paths: Optional[set] = None,
+    ) -> List[Tuple[str, float]]:
+        """
+        Stage 1 — Fast coarse retrieval using CLIP cosine similarity.
+
+        Returns:
+            List of (video_path, similarity_score) sorted descending, length = top_n.
+        """
+        query_feat = self.encode_covr_query(
+            query_image, query_text, alpha, query_expansion_hint
+        )  # [1, D]
+
+        # Cosine similarity: query [1,D] × corpus [N,D]^T = [N]
+        sims = (corpus_embeddings @ query_feat.T).squeeze(-1)  # [N]
+
+        # Exclude previously rejected candidates
+        if exclude_paths:
+            for i, vp in enumerate(corpus_paths):
+                if vp in exclude_paths:
+                    sims[i] = -1.0
+
+        top_indices = torch.topk(sims, k=min(top_n, len(corpus_paths))).indices.tolist()
+        results = [(corpus_paths[i], float(sims[i])) for i in top_indices]
+        return results
+
+    def _video_to_tensor(self, video_path: str) -> Optional[List[torch.Tensor]]:
+        """
+        Load a candidate video and convert it to the video tensor format
+        expected by LLaVA (same as load_and_sample_video output).
+        Returns None if the video cannot be loaded.
+        """
+        try:
+            frames = load_video_frames(video_path, fps=1, force_sample=False)
+            if frames is None or (hasattr(frames, '__len__') and len(frames) == 0):
+                return None
+            key_frames, _ = select_keyframes(
+                frames, "describe this video",
+                self.clip_model, self.clip_processor
+            )
+            try:
+                dev = next(
+                    p.device for p in self.model.parameters()
+                    if not p.is_meta and p.device.type == "cuda"
+                )
+            except StopIteration:
+                dev = torch.device("cuda:0")
+            vid_tensor = (
+                self.image_processor.preprocess(key_frames, return_tensors="pt")["pixel_values"]
+                .to(dev, dtype=torch.float16)
+            )
+            return [vid_tensor]
+        except Exception as e:
+            print(f"[ReAgentV] _video_to_tensor failed for {video_path}: {e}")
+            return None
+
+    def agentic_rerank(
+        self,
+        query_image: Image.Image,
+        query_text: str,
+        candidate_list: List[Tuple[str, float]],
+        top_k: int = 5,
+    ) -> List[Tuple[str, float, str]]:
+        """
+        Stage 2 — Fine-grained Agentic Reranking using LLaVA + CoVR Rerank Prompt.
+
+        For each candidate video, LLaVA evaluates how well the video demonstrates
+        the edit instruction starting from the reference image visual state.
+        The candidates are re-sorted by the agent's relevance_score.
+
+        Args:
+            query_image    : PIL Image (query image / reference frame).
+            query_text     : Edit instruction string.
+            candidate_list : Output of coarse_search() — list of (path, clip_sim).
+            top_k          : How many final results to return.
+
+        Returns:
+            List of (video_path, relevance_score, verdict) sorted descending.
+        """
+        # Encode query image into a single-frame tensor for LLaVA vision input
+        try:
+            dev = next(
+                p.device for p in self.model.parameters()
+                if not p.is_meta and p.device.type == "cuda"
+            )
+        except StopIteration:
+            dev = torch.device("cuda:0")
+
+        q_img_tensor = (
+            self.image_processor.preprocess([query_image], return_tensors="pt")["pixel_values"]
+            .to(dev, dtype=torch.float16)
+        )  # [1, C, H, W]
+
+        reranked = []
+        for video_path, clip_score in candidate_list:
+            vid_tensor = self._video_to_tensor(video_path)
+            if vid_tensor is None:
+                reranked.append((video_path, 0.0, "NO_MATCH"))
+                continue
+
+            # Build combined vision input: [query_frame + video_frames]
+            combined_tensor = torch.cat([q_img_tensor, vid_tensor[0]], dim=0)
+            combined_input = [combined_tensor]
+
+            prompt = covr_rerank_prompt_template.format(edit_prompt=query_text)
+            try:
+                raw_output = llava_inference(prompt, combined_input)
+                # Parse JSON output
+                import re
+                cleaned = re.sub(r"^```(?:json)?\s*", "", raw_output.strip(), flags=re.MULTILINE)
+                cleaned = re.sub(r"\s*```$", "", cleaned, flags=re.MULTILINE).strip()
+                data = json.loads(cleaned)
+                rel_score = float(data.get("relevance_score", clip_score))
+                verdict = data.get("verdict", "PARTIAL_MATCH")
+            except Exception as e:
+                print(f"[ReAgentV] agentic_rerank parse error for {video_path}: {e}")
+                rel_score = clip_score * 0.5  # Fallback: half the CLIP score
+                verdict = "PARTIAL_MATCH"
+
+            reranked.append((video_path, rel_score, verdict))
+            torch.cuda.empty_cache()
+
+        # Sort by relevance_score descending
+        reranked.sort(key=lambda x: x[1], reverse=True)
+        return reranked[:top_k]
+
+    def covr_critic_evaluate(
+        self,
+        query_image: Image.Image,
+        query_text: str,
+        top1_video_path: str,
+    ) -> Tuple[float, str]:
+        """
+        Run the Critic Agent on the current Top-1 retrieval result.
+        Returns (scalar_reward, critic_raw_json) for the Memory Bank.
+        """
+        try:
+            dev = next(
+                p.device for p in self.model.parameters()
+                if not p.is_meta and p.device.type == "cuda"
+            )
+        except StopIteration:
+            dev = torch.device("cuda:0")
+
+        q_img_tensor = (
+            self.image_processor.preprocess([query_image], return_tensors="pt")["pixel_values"]
+            .to(dev, dtype=torch.float16)
+        )
+        vid_tensor = self._video_to_tensor(top1_video_path)
+        if vid_tensor is None:
+            return 0.0, '{"scalar_reward": 0.0, "structured_feedback": "Video could not be loaded."}'
+
+        combined = torch.cat([q_img_tensor, vid_tensor[0]], dim=0)
+        combined_input = [combined]
+
+        candidate_id = os.path.basename(top1_video_path)
+        prompt = covr_critic_prompt_template.format(
+            edit_prompt=query_text,
+            candidate_id=candidate_id,
+        )
+        critic_raw = llava_inference(prompt, combined_input)
+        scalar_reward = _extract_scalar_reward(critic_raw)
+        return scalar_reward, critic_raw
+
+    def adaptive_covr_retrieval(
+        self,
+        query_image: Image.Image,
+        query_text: str,
+        corpus_embeddings: torch.Tensor,
+        corpus_paths: List[str],
+        top_k: int = 5,
+        top_n_coarse: int = 20,
+        max_iterations: int = 3,
+        reward_threshold: float = 0.65,
+    ) -> List[Tuple[str, float, str]]:
+        """
+        Full Two-Stage Adaptive Retrieval Loop with Memory Bank.
+
+        1. Coarse Search (CLIP) → Top-N candidates
+        2. Agentic Reranker (LLaVA) → Top-K results
+        3. Critic Agent evaluates Top-1
+        4. If score < threshold AND iterations remaining:
+               Memory Bank adapts strategy → go to step 1
+        5. Return best Top-K result across all iterations.
+
+        Args:
+            query_image      : PIL Image (middle frame from pth1).
+            query_text       : Edit instruction from CSV column 'edit'.
+            corpus_embeddings: Tensor [N, D] from load_corpus_index().
+            corpus_paths     : List of N video paths.
+            top_k            : Final number of ranked results to return.
+            top_n_coarse     : Number of candidates from Stage 1.
+            max_iterations   : Maximum number of adaptive retry iterations.
+            reward_threshold : Critic score above which we stop iterating.
+
+        Returns:
+            List of (video_path, relevance_score, verdict) — Top-K final results.
+        """
+        memory = ToolMemoryBank(
+            max_iterations=max_iterations,
+            reward_threshold=reward_threshold,
+        )
+
+        best_results = []
+
+        for iteration in range(max_iterations):
+            print(f"\n[ReAgentV] === Iteration {iteration + 1}/{max_iterations} ===")
+
+            # Get adaptive strategy from Memory Bank
+            strategy = memory.get_current_strategy()
+            alpha          = strategy["alpha"]
+            exclude_paths  = strategy["exclude_videos"]
+            hint           = strategy["query_expansion_hint"]
+            force_ocr      = strategy["force_ocr"]
+            force_det      = strategy["force_det"]
+
+            # Optionally expand query via LLaVA if hint is requested
+            expanded_text = query_text
+            if iteration > 0 and not hint:
+                try:
+                    expansion_prompt = covr_query_expansion_template.format(
+                        edit_prompt=query_text
+                    )
+                    hint = llava_inference(expansion_prompt, None).strip()[:100]
+                    print(f"[ReAgentV] Query expanded: '{hint}'")
+                except Exception:
+                    pass
+
+            tools_used = ["CLIP_coarse"]
+            if force_det:
+                tools_used.append("DET")
+            if force_ocr:
+                tools_used.append("OCR")
+
+            # Stage 1: Coarse CLIP retrieval
+            coarse_results = self.coarse_search(
+                query_image, query_text,
+                corpus_embeddings, corpus_paths,
+                top_n=top_n_coarse,
+                alpha=alpha,
+                query_expansion_hint=hint,
+                exclude_paths=exclude_paths,
+            )
+
+            # Stage 2: Agentic Reranker
+            reranked = self.agentic_rerank(
+                query_image, query_text, coarse_results, top_k=top_k
+            )
+
+            if not reranked:
+                print("[ReAgentV] No valid reranked results — stopping early.")
+                break
+
+            top1_path = reranked[0][0]
+
+            # Stage 3: Critic Agent evaluates Top-1
+            scalar_reward, critic_raw = self.covr_critic_evaluate(
+                query_image, query_text, top1_path
+            )
+
+            candidate_paths = [r[0] for r in reranked]
+            memory.record_step(
+                iteration=iteration,
+                tools_used=tools_used,
+                query_prompt_used=expanded_text,
+                top_candidates=candidate_paths,
+                critic_raw=critic_raw,
+                scalar_reward=scalar_reward,
+            )
+
+            # Track best result
+            if not best_results or scalar_reward > _extract_scalar_reward(
+                memory.history[memory.history.index(
+                    max(memory.history, key=lambda r: r.scalar_reward)
+                )].critic_raw
+            ):
+                best_results = reranked
+
+            if not memory.should_continue(scalar_reward, iteration):
+                print(f"[ReAgentV] Stopping: reward={scalar_reward:.3f} >= threshold={reward_threshold} or max iterations reached.")
+                break
+
+        print(memory.summary())
+        return best_results if best_results else reranked
