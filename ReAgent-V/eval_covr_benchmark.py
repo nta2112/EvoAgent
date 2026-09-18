@@ -65,6 +65,8 @@ def main():
     parser.add_argument("--max_iterations",  type=int,   default=1)
     parser.add_argument("--reward_threshold",type=float, default=0.65)
     parser.add_argument("--alpha",           type=float, default=0.35)
+    parser.add_argument("--hybrid_alpha",    type=float, default=0.4,
+                        help="Weight for CLIP similarity in hybrid reranking (default: 0.4)")
     parser.add_argument("--output_path",     type=str,   default="eval_results.json")
     args = parser.parse_args()
 
@@ -139,6 +141,7 @@ def main():
             top_n_coarse=args.top_n_coarse,
             max_iterations=args.max_iterations,
             reward_threshold=args.reward_threshold,
+            hybrid_alpha=args.hybrid_alpha,
         )
         agent_paths = [os.path.normpath(r[0]) for r in agent_results]
         if gt_norm in agent_paths:

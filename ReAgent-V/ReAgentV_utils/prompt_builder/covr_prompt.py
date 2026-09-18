@@ -17,34 +17,15 @@ starting from the state shown in the query image.
 
 covr_rerank_prompt_template = """
 [Task]
-You are a Video Retrieval Judge. You will be given:
-1. A Reference Image (the starting state or context).
-2. An Edit Instruction (what should change or happen in the target video).
-3. A Candidate Video (a sequence of frames to evaluate).
-
-Your job is to judge whether the Candidate Video correctly demonstrates the transformation
-or action described in the Edit Instruction, starting from a visual state similar to the Reference Image.
+You are a Video Retrieval Judge. Evaluate if the Candidate Video correctly demonstrates the Edit Instruction starting from the Reference Image visual context.
 
 [Edit Instruction]
 {edit_prompt}
 
-[Evaluation Criteria]
-Score the candidate video on the following four dimensions (0.0 – 5.0 each):
-
-1. Visual Continuity: Does the candidate video start with a visual state similar to the Reference Image?
-2. Action/Edit Fidelity: Does the video correctly demonstrate the action or change specified in the Edit Instruction?
-3. Semantic Consistency: Are the key objects, colors, and scene elements coherent with the instruction?
-4. Temporal Completeness: Does the video show the transformation fully (not cut short or irrelevant)?
-
 [Output Format]
-Return ONLY a valid JSON object:
+Output ONLY a concise JSON object with no explanations or reasons:
 {{
-  "visual_continuity": {{"value": <float>, "reason": "<short reason>"}},
-  "action_fidelity":   {{"value": <float>, "reason": "<short reason>"}},
-  "semantic_consistency": {{"value": <float>, "reason": "<short reason>"}},
-  "temporal_completeness": {{"value": <float>, "reason": "<short reason>"}},
-  "total_score": <sum of the four values, max 20.0>,
-  "relevance_score": <float 0.0-1.0, normalized total_score / 20.0>,
+  "relevance_score": <float from 0.0 to 1.0>,
   "verdict": "<MATCH | PARTIAL_MATCH | NO_MATCH>"
 }}
 """

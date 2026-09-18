@@ -429,22 +429,26 @@ class ReAgentV:
         query_text: str,
         candidate_list: List[Tuple[str, float]],
         top_k: int = 5,
+        hybrid_alpha: float = 0.4,
     ) -> List[Tuple[str, float, str]]:
         """
-        Stage 2 — Fine-grained Agentic Reranking using LLaVA + CoVR Rerank Prompt.
+        Stage 2 — Fine-grained Agentic Reranking using LLaVA + Hybrid Scoring.
 
-        For each candidate video, LLaVA evaluates how well the video demonstrates
-        the edit instruction starting from the reference image visual state.
-        The candidates are re-sorted by the agent's relevance_score.
+        Combines CLIP visual similarity with LLaVA action/edit relevance:
+            final_score = hybrid_alpha * clip_score + (1 - hybrid_alpha) * rel_score
+
+        This breaks score ties when LLaVA assigns identical relevance to multiple
+        candidates, preventing false rank drops in Recall@5 and Recall@10.
 
         Args:
             query_image    : PIL Image (query image / reference frame).
             query_text     : Edit instruction string.
             candidate_list : Output of coarse_search() — list of (path, clip_sim).
             top_k          : How many final results to return.
+            hybrid_alpha   : Weight for CLIP similarity (default 0.4).
 
         Returns:
-            List of (video_path, relevance_score, verdict) sorted descending.
+            List of (video_path, final_score, verdict) sorted descending.
         """
         # Encode query image into a single-frame tensor for LLaVA vision input
         try:
@@ -482,17 +486,24 @@ class ReAgentV:
                 rel_score = float(data.get("relevance_score", clip_score))
                 verdict = data.get("verdict", "PARTIAL_MATCH")
             except Exception as e:
-                print(f"[ReAgentV] agentic_rerank parse error for {video_path}: {e}")
-                rel_score = clip_score * 0.5  # Fallback: half the CLIP score
-                verdict = "PARTIAL_MATCH"
+                # Fallback on regex if JSON parsing fails
+                m = re.search(r"\"?relevance_score\"?\s*:\s*([0-9]*\.?[0-9]+)", raw_output)
+                if m:
+                    rel_score = float(m.group(1))
+                    verdict = "PARTIAL_MATCH"
+                else:
+                    rel_score = clip_score * 0.5
+                    verdict = "PARTIAL_MATCH"
 
-            reranked.append((video_path, rel_score, verdict))
+            # Hybrid scoring: blend CLIP similarity with LLaVA relevance
+            final_score = hybrid_alpha * float(clip_score) + (1.0 - hybrid_alpha) * rel_score
+            reranked.append((video_path, round(final_score, 4), verdict))
             del vid_tensor, combined_tensor, combined_input
 
         # Single cache cleanup after all candidates are scored
         torch.cuda.empty_cache()
 
-        # Sort by relevance_score descending
+        # Sort by hybrid final_score descending
         reranked.sort(key=lambda x: x[1], reverse=True)
         return reranked[:top_k]
 
@@ -547,6 +558,7 @@ class ReAgentV:
         top_n_coarse: int = 20,
         max_iterations: int = 3,
         reward_threshold: float = 0.65,
+        hybrid_alpha: float = 0.4,
     ) -> List[Tuple[str, float, str]]:
         """
         Full Two-Stage Adaptive Retrieval Loop with Memory Bank.
@@ -623,7 +635,7 @@ class ReAgentV:
 
             # Stage 2: Agentic Reranker
             reranked = self.agentic_rerank(
-                query_image, query_text, coarse_results, top_k=top_k
+                query_image, query_text, coarse_results, top_k=top_k, hybrid_alpha=hybrid_alpha
             )
 
             if not reranked:
