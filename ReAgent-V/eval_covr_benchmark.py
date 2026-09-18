@@ -65,8 +65,8 @@ def main():
     parser.add_argument("--max_iterations",  type=int,   default=1)
     parser.add_argument("--reward_threshold",type=float, default=0.65)
     parser.add_argument("--alpha",           type=float, default=0.35)
-    parser.add_argument("--hybrid_alpha",    type=float, default=0.4,
-                        help="Weight for CLIP similarity in hybrid reranking (default: 0.4)")
+    parser.add_argument("--hybrid_alpha",    type=float, default=0.25,
+                        help="Weight for CLIP similarity in hybrid reranking (default: 0.25)")
     parser.add_argument("--output_path",     type=str,   default="eval_results.json")
     args = parser.parse_args()
 

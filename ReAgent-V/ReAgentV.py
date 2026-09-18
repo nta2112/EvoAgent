@@ -429,7 +429,7 @@ class ReAgentV:
         query_text: str,
         candidate_list: List[Tuple[str, float]],
         top_k: int = 5,
-        hybrid_alpha: float = 0.4,
+        hybrid_alpha: float = 0.25,
     ) -> List[Tuple[str, float, str]]:
         """
         Stage 2 — Fine-grained Agentic Reranking using LLaVA + Hybrid Scoring.
@@ -558,7 +558,7 @@ class ReAgentV:
         top_n_coarse: int = 20,
         max_iterations: int = 3,
         reward_threshold: float = 0.65,
-        hybrid_alpha: float = 0.4,
+        hybrid_alpha: float = 0.25,
     ) -> List[Tuple[str, float, str]]:
         """
         Full Two-Stage Adaptive Retrieval Loop with Memory Bank.
