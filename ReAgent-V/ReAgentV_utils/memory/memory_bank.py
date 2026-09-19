@@ -17,6 +17,7 @@ The memory bank stores:
 """
 
 from __future__ import annotations
+import os
 import json
 import re
 from dataclasses import dataclass, field
@@ -65,7 +66,7 @@ class ToolMemoryBank:
     def __init__(
         self,
         max_iterations: int = 3,
-        reward_threshold: float = 0.65,
+        reward_threshold: float = 0.80,
         initial_alpha: float = 0.5,
     ):
         self.max_iterations   = max_iterations
@@ -115,10 +116,12 @@ class ToolMemoryBank:
         )
         self.history.append(record)
 
-        # We avoid strictly blacklisting top candidates to avoid false negative rejection,
-        # but keep track of visited candidates for analysis.
+        # If the candidate was rejected by Critic, blacklist it so it does not block
+        # better candidates (such as Ground Truth) in subsequent iterations.
         if scalar_reward < self.reward_threshold and top_candidates:
-            pass  # Do not blacklist to protect Recall@K metrics
+            rejected_top1 = top_candidates[0]
+            self.visited_negatives.add(rejected_top1)
+            print(f"[MemoryBank] Blacklisted rejected candidate: {os.path.basename(rejected_top1)}")
 
         print(
             f"[MemoryBank] Iter {iteration} | reward={scalar_reward:.3f} | "

@@ -583,7 +583,7 @@ class ReAgentV:
         top_k: int = 5,
         top_n_coarse: int = 20,
         max_iterations: int = 3,
-        reward_threshold: float = 0.65,
+        reward_threshold: float = 0.80,
         hybrid_alpha: float = 0.25,
     ) -> List[Tuple[str, float, str]]:
         """
@@ -625,6 +625,7 @@ class ReAgentV:
         )
 
         best_results = []
+        best_reward = -1.0
 
         for iteration in range(max_iterations):
             print(f"\n[ReAgentV] === Iteration {iteration + 1}/{max_iterations} ===")
@@ -697,12 +698,9 @@ class ReAgentV:
                 scalar_reward=scalar_reward,
             )
 
-            # Track best result
-            if not best_results or scalar_reward > _extract_scalar_reward(
-                memory.history[memory.history.index(
-                    max(memory.history, key=lambda r: r.scalar_reward)
-                )].critic_raw
-            ):
+            # Track best result across iterations
+            if scalar_reward > best_reward:
+                best_reward = scalar_reward
                 best_results = reranked
 
             if not memory.should_continue(scalar_reward, iteration):

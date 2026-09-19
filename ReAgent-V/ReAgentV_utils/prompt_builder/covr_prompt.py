@@ -39,8 +39,8 @@ Output ONLY a concise JSON object with no explanations or reasons:
 
 covr_critic_prompt_template = """
 [Task]
-You are a Critic Agent evaluating the Top-1 retrieved video for a Composed Video Retrieval (CoVR) query.
-Determine if the video matches the visual context of the Reference Image and correctly executes the Edit Instruction.
+You are a strict Critic Agent evaluating the Top-1 retrieved video for a Composed Video Retrieval (CoVR) query.
+Judge whether the Candidate Video preserves the Reference Image visual context AND faithfully executes the Edit Instruction.
 
 [Query]
 - Edit Instruction: {edit_prompt}
@@ -50,10 +50,15 @@ Determine if the video matches the visual context of the Reference Image and cor
 - Video ID: {candidate_id}
 - Video Frames: [Attached in vision input]
 
+[Scoring Rules]
+- EXACT MATCH (0.85 - 1.0): The video accurately executes the edit instruction while maintaining visual continuity.
+- PARTIAL / WRONG (0.10 - 0.45): Fails the specific edit, shows wrong entities, or only has coincidental background similarity (e.g., wrong object, action not executed, or unchanged state -> MUST score <= 0.40).
+- IRRELEVANT (0.0): Completely unrelated.
+
 [Output Format]
-Return ONLY a valid JSON object. Keep scalar_reward on the FIRST line:
+Return ONLY a valid JSON object. Put scalar_reward on the FIRST line:
 {{
-  "scalar_reward": <float between 0.0 and 1.0, where 1.0 is perfect match, >=0.65 is acceptable, <0.65 is mismatch>,
+  "scalar_reward": <float 0.0 to 1.0 based on the strict rules above>,
   "verdict": "<MATCH | PARTIAL_MATCH | MISMATCH>",
   "diagnostic": "<brief diagnostic: visual_mismatch | action_mismatch | object_missing | text_mismatch | correct>",
   "structured_feedback": "<brief 1-sentence explanation>"
