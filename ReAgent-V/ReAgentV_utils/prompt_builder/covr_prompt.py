@@ -17,18 +17,25 @@ starting from the state shown in the query image.
 
 covr_rerank_prompt_template = """
 [Task]
-You are a strict Video Retrieval Judge evaluating if the Candidate Video correctly demonstrates the Edit Instruction starting from the Reference Image visual context.
+You are a Video Retrieval Judge evaluating if a Candidate Video satisfies a Composed Video Retrieval (CoVR) query.
+
+[Visual Input Layout]
+- Frame 1 (first image): The Reference Image representing the starting state.
+- Frames 2, 3, 4, 5 (following images): Sequential keyframes from the Candidate Video showing the resulting state/action.
 
 [Edit Instruction]
 {edit_prompt}
 
+[Goal]
+Judge whether the Candidate Video (Frames 2-5) preserves relevant scene context from the Reference Image (Frame 1) while successfully applying the Edit Instruction.
+
 [Scoring Criteria]
-- PERFECT MATCH (0.90 - 1.0): The video clearly shows the target edit/action performed on or replacing the reference content.
-- PARTIAL / WRONG ACTION (0.35 - 0.55): The video has similar scene/background but fails the specific edit, shows wrong entities, or fails the action.
-- NO MATCH (0.0 - 0.20): Unchanged scene, irrelevant action, or fails the core edit instruction.
+- HIGH RELEVANCE (0.85 - 1.0): The Candidate Video clearly executes the edit instruction (shows the requested new object, action, or state change) with consistent context.
+- MEDIUM RELEVANCE (0.45 - 0.70): Partially related scene or related topic, but does not clearly show the specific requested edit.
+- LOW RELEVANCE (0.0 - 0.30): Completely unchanged, wrong action, or wrong entities.
 
 [Output Format]
-Output ONLY a concise JSON object with no explanations or reasons:
+Output ONLY a concise JSON object:
 {{
   "relevance_score": <float from 0.0 to 1.0 based on criteria above>,
   "verdict": "<MATCH | PARTIAL_MATCH | NO_MATCH>"
@@ -44,21 +51,22 @@ Output ONLY a concise JSON object with no explanations or reasons:
 
 covr_critic_prompt_template = """
 [Task]
-You are a strict Critic Agent evaluating the Top-1 retrieved video for a Composed Video Retrieval (CoVR) query.
-Judge whether the Candidate Video preserves the Reference Image visual context AND faithfully executes the Edit Instruction.
+You are a strict Critic Agent evaluating whether the retrieved Candidate Video correctly solves the Composed Video Retrieval task.
+
+[Visual Input Layout]
+- Frame 1: The Reference Image (initial state).
+- Frames 2, 3, 4, 5: Sequential frames from the Candidate Video (resulting state).
 
 [Query]
 - Edit Instruction: {edit_prompt}
-- Reference Image: [Attached in vision input]
 
 [Candidate Video]
 - Video ID: {candidate_id}
-- Video Frames: [Attached in vision input]
 
 [Scoring Rules]
-- EXACT MATCH (0.85 - 1.0): The video accurately executes the edit instruction while maintaining visual continuity.
-- PARTIAL / WRONG (0.10 - 0.45): Fails the specific edit, shows wrong entities, or only has coincidental background similarity (e.g., wrong object, action not executed, or unchanged state -> MUST score <= 0.40).
-- IRRELEVANT (0.0): Completely unrelated.
+- EXACT MATCH (0.85 - 1.0): The Candidate Video accurately executes the edit instruction while preserving relevant visual context from the Reference Image.
+- PARTIAL / WRONG (0.10 - 0.50): Fails the edit, wrong object/action, or merely coincidental background.
+- IRRELEVANT (0.0): Completely unrelated scene and action.
 
 [Output Format]
 Return ONLY a valid JSON object. Put scalar_reward on the FIRST line:
