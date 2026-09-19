@@ -209,15 +209,46 @@ class ToolMemoryBank:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _strip_llava_output(raw: str) -> str:
+    """
+    Strip LLaVA chat-template artifacts and markdown code fences so that
+    the remaining string is plain JSON that json.loads() can parse.
+
+    Handles patterns like:
+      - "system\n...\nassistant\n{...}"
+      - "```json\n{...}\n```"
+      - Leading/trailing whitespace
+    """
+    if not raw:
+        return raw
+    text = raw.strip()
+    # Remove chat-template prefix: keep only content after last 'assistant\n'
+    if "assistant\n" in text:
+        text = text.split("assistant\n")[-1].strip()
+    # Strip markdown code fences  ```json ... ```
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\s*```$",          "", text, flags=re.MULTILINE)
+    return text.strip()
+
+
 def _extract_scalar_reward(critic_raw: str) -> float:
     """Parse scalar_reward from the Critic Agent JSON output."""
+    cleaned = _strip_llava_output(critic_raw)
+    # Attempt 1: full JSON parse
     try:
-        data = json.loads(critic_raw.strip())
+        data = json.loads(cleaned)
         return float(data.get("scalar_reward", 0.5))
     except Exception:
         pass
-    # Fallback: regex search
-    m = re.search(r'"scalar_reward"\s*:\s*([0-9.]+)', critic_raw)
+    # Attempt 2: regex on cleaned text
+    m = re.search(r'"scalar_reward"\s*:\s*([0-9]*\.?[0-9]+)', cleaned)
+    if m:
+        try:
+            return float(m.group(1))
+        except Exception:
+            pass
+    # Attempt 3: regex on raw text (fallback)
+    m = re.search(r'"scalar_reward"\s*:\s*([0-9]*\.?[0-9]+)', critic_raw)
     if m:
         try:
             return float(m.group(1))
@@ -228,15 +259,17 @@ def _extract_scalar_reward(critic_raw: str) -> float:
 
 def _extract_critique_summary(critic_raw: str) -> str:
     """Extract the structured_feedback field from critic JSON."""
+    cleaned = _strip_llava_output(critic_raw)
     try:
-        data = json.loads(critic_raw.strip())
+        data = json.loads(cleaned)
         return data.get("structured_feedback", "")
     except Exception:
         pass
-    m = re.search(r'"structured_feedback"\s*:\s*"([^"]+)"', critic_raw)
+    m = re.search(r'"structured_feedback"\s*:\s*"([^"]+)"', cleaned)
     if m:
         return m.group(1)
-    return critic_raw[:200]  # fallback: first 200 chars
+    # Fallback: first 200 chars of cleaned output
+    return cleaned[:200]
 
 
 def _extract_action_keywords(prompt: str) -> str:

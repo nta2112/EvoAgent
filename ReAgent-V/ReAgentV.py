@@ -36,7 +36,7 @@ from ReAgentV_utils.prompt_builder.build_multimodal_prompt import build_multimod
 from ReAgentV_utils.model_loader.load_default import load_default
 from ReAgentV_utils.model_inference.model_inference import llava_inference
 from ReAgentV_utils.critical_question_generator.generate_critical_question import evaluate_answer
-from ReAgentV_utils.memory.memory_bank import ToolMemoryBank, _extract_scalar_reward
+from ReAgentV_utils.memory.memory_bank import ToolMemoryBank, _extract_scalar_reward, _strip_llava_output
 
 
 class ReAgentV:
@@ -430,6 +430,7 @@ class ReAgentV:
         candidate_list: List[Tuple[str, float]],
         top_k: int = 5,
         hybrid_alpha: float = 0.25,
+        score_cache: Optional[Dict[str, Tuple[float, str]]] = None,
     ) -> List[Tuple[str, float, str]]:
         """
         Stage 2 — Fine-grained Agentic Reranking using LLaVA + Hybrid Scoring.
@@ -440,16 +441,29 @@ class ReAgentV:
         This breaks score ties when LLaVA assigns identical relevance to multiple
         candidates, preventing false rank drops in Recall@5 and Recall@10.
 
+        Candidate Score Caching:
+            If score_cache is provided (a dict), LLaVA inference is skipped for
+            any video_path already present in the cache. The cached (rel_score,
+            verdict) pair is reused directly, saving one full decode + inference
+            cycle per repeated candidate across iterations.
+
         Args:
             query_image    : PIL Image (query image / reference frame).
             query_text     : Edit instruction string.
             candidate_list : Output of coarse_search() — list of (path, clip_sim).
             top_k          : How many final results to return.
-            hybrid_alpha   : Weight for CLIP similarity (default 0.4).
+            hybrid_alpha   : Weight for CLIP similarity (default 0.25).
+            score_cache    : Optional shared dict {video_path: (rel_score, verdict)}
+                             populated and read across iterations for the same query.
 
         Returns:
             List of (video_path, final_score, verdict) sorted descending.
         """
+        import re
+
+        if score_cache is None:
+            score_cache = {}
+
         # Encode query image into a single-frame tensor for LLaVA vision input
         try:
             dev = next(
@@ -466,8 +480,19 @@ class ReAgentV:
 
         reranked = []
         for video_path, clip_score in candidate_list:
+
+            # ── Cache HIT: reuse previously computed LLaVA score ──────────────
+            if video_path in score_cache:
+                rel_score, verdict = score_cache[video_path]
+                print(f"[Cache HIT] {os.path.basename(video_path)} rel={rel_score:.3f}")
+                final_score = hybrid_alpha * float(clip_score) + (1.0 - hybrid_alpha) * rel_score
+                reranked.append((video_path, round(final_score, 4), verdict))
+                continue
+
+            # ── Cache MISS: run LLaVA inference and populate cache ─────────────
             vid_tensor = self._video_to_tensor(video_path)
             if vid_tensor is None:
+                score_cache[video_path] = (0.0, "NO_MATCH")
                 reranked.append((video_path, 0.0, "NO_MATCH"))
                 continue
 
@@ -478,22 +503,23 @@ class ReAgentV:
             prompt = covr_rerank_prompt_template.format(edit_prompt=query_text)
             try:
                 raw_output = llava_inference(prompt, combined_input)
-                # Parse JSON output
-                import re
-                cleaned = re.sub(r"^```(?:json)?\s*", "", raw_output.strip(), flags=re.MULTILINE)
-                cleaned = re.sub(r"\s*```$", "", cleaned, flags=re.MULTILINE).strip()
+                # Strip LLaVA chat-template artifacts + markdown code fences
+                cleaned = _strip_llava_output(raw_output)
                 data = json.loads(cleaned)
                 rel_score = float(data.get("relevance_score", clip_score))
                 verdict = data.get("verdict", "PARTIAL_MATCH")
-            except Exception as e:
+            except Exception:
                 # Fallback on regex if JSON parsing fails
-                m = re.search(r"\"?relevance_score\"?\s*:\s*([0-9]*\.?[0-9]+)", raw_output)
+                m = re.search(r'"?relevance_score"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output)
                 if m:
                     rel_score = float(m.group(1))
                     verdict = "PARTIAL_MATCH"
                 else:
                     rel_score = clip_score * 0.5
                     verdict = "PARTIAL_MATCH"
+
+            # Store in cache for future iterations
+            score_cache[video_path] = (rel_score, verdict)
 
             # Hybrid scoring: blend CLIP similarity with LLaVA relevance
             final_score = hybrid_alpha * float(clip_score) + (1.0 - hybrid_alpha) * rel_score
@@ -570,6 +596,12 @@ class ReAgentV:
                Memory Bank adapts strategy → go to step 1
         5. Return best Top-K result across all iterations.
 
+        Candidate Score Caching:
+            A per-query dict ``_score_cache`` maps video_path → (rel_score, verdict).
+            LLaVA inference is skipped on any subsequent iteration where a candidate
+            video was already scored in a previous round, eliminating redundant
+            decode + inference cycles and making multi-iteration retrieval much faster.
+
         Args:
             query_image      : PIL Image (middle frame from pth1).
             query_text       : Edit instruction from CSV column 'edit'.
@@ -579,10 +611,14 @@ class ReAgentV:
             top_n_coarse     : Number of candidates from Stage 1.
             max_iterations   : Maximum number of adaptive retry iterations.
             reward_threshold : Critic score above which we stop iterating.
+            hybrid_alpha     : CLIP weight in hybrid score (default 0.25).
 
         Returns:
             List of (video_path, relevance_score, verdict) — Top-K final results.
         """
+        # Per-query score cache: {video_path: (rel_score, verdict)}
+        # Cleared automatically when this method returns (Python GC).
+        _score_cache: Dict[str, Tuple[float, str]] = {}
         memory = ToolMemoryBank(
             max_iterations=max_iterations,
             reward_threshold=reward_threshold,
@@ -633,9 +669,11 @@ class ReAgentV:
                 exclude_paths=exclude_paths,
             )
 
-            # Stage 2: Agentic Reranker
+            # Stage 2: Agentic Reranker (with shared per-query score cache)
             reranked = self.agentic_rerank(
-                query_image, query_text, coarse_results, top_k=top_k, hybrid_alpha=hybrid_alpha
+                query_image, query_text, coarse_results,
+                top_k=top_k, hybrid_alpha=hybrid_alpha,
+                score_cache=_score_cache,
             )
 
             if not reranked:
