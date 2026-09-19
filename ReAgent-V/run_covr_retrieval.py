@@ -62,8 +62,8 @@ def main():
     parser.add_argument("--top_k",         type=int, default=5)
     parser.add_argument("--top_n_coarse",  type=int, default=20)
     parser.add_argument("--max_iterations",type=int, default=3)
-    parser.add_argument("--reward_threshold", type=float, default=0.78)
-    parser.add_argument("--alpha",         type=float, default=0.35,
+    parser.add_argument("--reward_threshold", type=float, default=0.85)
+    parser.add_argument("--alpha",         type=float, default=0.50,
                         help="Initial Image/Text weight for CLIP query fusion")
     args = parser.parse_args()
 

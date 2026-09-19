@@ -66,8 +66,8 @@ class ToolMemoryBank:
     def __init__(
         self,
         max_iterations: int = 3,
-        reward_threshold: float = 0.78,
-        initial_alpha: float = 0.35,
+        reward_threshold: float = 0.85,
+        initial_alpha: float = 0.5,
     ):
         self.max_iterations   = max_iterations
         self.reward_threshold = reward_threshold
@@ -116,13 +116,8 @@ class ToolMemoryBank:
         )
         self.history.append(record)
 
-        # Only blacklist candidate if Critic confirms it is a clear mismatch (reward <= 0.45).
-        # Candidates with reward > 0.45 (and especially >= 0.70) must NEVER be blacklisted,
-        # as they may be Ground Truth or highly relevant targets.
-        if scalar_reward <= 0.45 and top_candidates:
-            rejected_top1 = top_candidates[0]
-            self.visited_negatives.add(rejected_top1)
-            print(f"[MemoryBank] Blacklisted confirmed negative: {os.path.basename(rejected_top1)}")
+        # Do not blacklist candidates to avoid false negative rejection and protect Recall@K
+        pass
 
         print(
             f"[MemoryBank] Iter {iteration} | reward={scalar_reward:.3f} | "
@@ -178,11 +173,11 @@ class ToolMemoryBank:
             strategy["force_ocr"] = True
             print("[MemoryBank] Strategy: enabling forced OCR (text content mismatch).")
 
-        # --- Rule 4: General low score → balanced fusion (alpha=0.35) ---
+        # --- Rule 4: General low score → balanced fusion (alpha=0.50) ---
         else:
-            strategy["alpha"] = 0.35
+            strategy["alpha"] = 0.50
             strategy["force_det"] = True
-            print("[MemoryBank] Strategy: balanced fusion (alpha=0.35) + DET (generic low score).")
+            print("[MemoryBank] Strategy: balanced fusion (alpha=0.50) + DET (generic low score).")
 
         self.alpha = strategy["alpha"]  # persist for next call
         return strategy

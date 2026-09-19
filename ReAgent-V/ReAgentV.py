@@ -325,13 +325,15 @@ class ReAgentV:
 
         # Format text with context prefix to align with target video representations
         clean_text = query_text.strip()
-        if query_expansion_hint:
-            # When target-focused expansion is available, use it directly as the target text description
-            full_text = f"a video showing {query_expansion_hint.strip()}"
-        elif not clean_text.lower().startswith("a video of") and not clean_text.lower().startswith("a video showing"):
-            full_text = f"a video showing {clean_text}"
+        if not clean_text.lower().startswith("a video of") and not clean_text.lower().startswith("a video showing"):
+            base_text = f"a video showing {clean_text}"
         else:
-            full_text = clean_text
+            base_text = clean_text
+
+        if query_expansion_hint:
+            full_text = f"{base_text}, {query_expansion_hint.strip()}"
+        else:
+            full_text = base_text
 
         with torch.no_grad():
             # Image branch
@@ -583,22 +585,19 @@ class ReAgentV:
         top_k: int = 5,
         top_n_coarse: int = 20,
         max_iterations: int = 3,
-        reward_threshold: float = 0.78,
+        reward_threshold: float = 0.85,
         hybrid_alpha: float = 0.25,
     ) -> List[Tuple[str, float, str]]:
         """
-        Full Two-Stage Adaptive Retrieval Loop with Memory Bank and Global Candidate Pool.
+        Full Two-Stage Adaptive Retrieval Loop with Memory Bank.
 
         1. Coarse Search (CLIP) → Top-N candidates
-        2. Agentic Reranker (LLaVA) → Scored Top-K results
-        3. Global Candidate Pool accumulates all scored candidates across iterations.
-        4. Critic Agent evaluates current Top-1:
-           - If reward >= threshold (e.g. 0.78): Confirmed match → Early stop.
-           - If reward <= 0.45: Confirmed mismatch → Penalize candidate score to 0.0
-             in pool so high-ranking runner-ups (e.g. Ground Truth) automatically advance!
-        5. If score < threshold AND iterations remaining:
-               Memory Bank adapts strategy → retry with reformulated query / adjusted alpha.
-        6. Return Top-K from global candidate pool sorted by final score descending.
+        2. Agentic Reranker (LLaVA) → Top-K ranked results
+        3. Critic Agent evaluates Top-1 result.
+        4. If score >= reward_threshold: Early stop (Confirmed High-Quality Hit).
+        5. Preserves the clean iteration 0 results (which rely on ground-truth edit prompt)
+           to safeguard Recall@5 and Recall@10, only superseding if a retry iteration
+           achieves a definitively superior score (>= reward_threshold).
 
         Args:
             query_image      : PIL Image (middle frame from pth1).
@@ -608,7 +607,7 @@ class ReAgentV:
             top_k            : Final number of ranked results to return.
             top_n_coarse     : Number of candidates from Stage 1.
             max_iterations   : Maximum number of adaptive retry iterations.
-            reward_threshold : Critic score above which we stop iterating (default 0.78).
+            reward_threshold : Critic score above which we stop iterating (default 0.85).
             hybrid_alpha     : CLIP weight in hybrid score (default 0.25).
 
         Returns:
@@ -619,12 +618,11 @@ class ReAgentV:
         memory = ToolMemoryBank(
             max_iterations=max_iterations,
             reward_threshold=reward_threshold,
+            initial_alpha=0.5,
         )
 
-        # Global candidate pool across all iterations: {video_path: (final_score, verdict)}
-        candidate_pool: Dict[str, Tuple[float, str]] = {}
+        best_results = []
         best_reward = -1.0
-        last_reranked = []
 
         for iteration in range(max_iterations):
             print(f"\n[ReAgentV] === Iteration {iteration + 1}/{max_iterations} ===")
@@ -637,7 +635,7 @@ class ReAgentV:
             force_ocr      = strategy["force_ocr"]
             force_det      = strategy["force_det"]
 
-            # In retry iterations, reformulate query via LLaVA to focus on target video
+            # In retry iterations, optionally generate visual detail hints
             expanded_text = query_text
             if iteration > 0:
                 try:
@@ -650,8 +648,8 @@ class ReAgentV:
                         raw_hint = raw_hint.split("assistant\n")[-1].strip()
                     hint_clean = raw_hint.replace("\n", " ").strip().strip('"\'')
                     if hint_clean:
-                        hint = hint_clean[:120].strip()
-                        print(f"[ReAgentV] Target-focused Query Expansion: '{hint}'")
+                        hint = hint_clean[:100].strip()
+                        print(f"[ReAgentV] Query expansion hint: '{hint}'")
                 except Exception as e:
                     print(f"[ReAgentV] Query expansion fallback: {e}")
 
@@ -674,20 +672,13 @@ class ReAgentV:
             # Stage 2: Agentic Reranker (with shared per-query score cache)
             reranked = self.agentic_rerank(
                 query_image, query_text, coarse_results,
-                top_k=max(top_k, 10), hybrid_alpha=hybrid_alpha,
+                top_k=top_k, hybrid_alpha=hybrid_alpha,
                 score_cache=_score_cache,
             )
 
             if not reranked:
                 print("[ReAgentV] No valid reranked results — stopping early.")
                 break
-
-            last_reranked = reranked
-
-            # Ingest all scored candidates into global candidate_pool to safeguard Recall@5 & Recall@10
-            for vpath, fscore, verd in reranked:
-                if vpath not in candidate_pool or fscore > candidate_pool[vpath][0]:
-                    candidate_pool[vpath] = (fscore, verd)
 
             top1_path = reranked[0][0]
 
@@ -706,33 +697,19 @@ class ReAgentV:
                 scalar_reward=scalar_reward,
             )
 
-            if scalar_reward >= reward_threshold:
-                # Confirmed high-quality match: boost Top-1 score and stop early
+            # Preserve iteration 0 as solid baseline.
+            # Only supersede if a retry iteration genuinely achieves a high reward (>= reward_threshold).
+            if not best_results:
+                best_results = reranked
                 best_reward = scalar_reward
-                candidate_pool[top1_path] = (max(candidate_pool[top1_path][0], 1.0), "MATCH")
-                print(f"[ReAgentV] Stopping: reward={scalar_reward:.3f} >= threshold={reward_threshold}. Confirmed Top-1!")
-                break
-            elif scalar_reward <= 0.45:
-                # Confirmed negative/mismatch: penalize score so valid candidates in pool advance
-                candidate_pool[top1_path] = (0.0, "MISMATCH")
-                print(f"[ReAgentV] Penalized rejected candidate: {os.path.basename(top1_path)} (score -> 0.0)")
-            else:
-                # Moderate score (partial match): keep in pool, track best reward
-                if scalar_reward > best_reward:
-                    best_reward = scalar_reward
+            elif scalar_reward > best_reward and scalar_reward >= reward_threshold:
+                best_results = reranked
+                best_reward = scalar_reward
+                print(f"[ReAgentV] Improved results in iteration {iteration + 1} with reward {scalar_reward:.3f}")
 
             if not memory.should_continue(scalar_reward, iteration):
-                print(f"[ReAgentV] Stopping: max iterations reached.")
+                print(f"[ReAgentV] Stopping: reward={scalar_reward:.3f} >= threshold={reward_threshold} or max iterations reached.")
                 break
 
         print(memory.summary())
-
-        # Compile final Top-K by sorting the master candidate pool
-        sorted_pool = sorted(
-            [(path, score, verd) for path, (score, verd) in candidate_pool.items()],
-            key=lambda x: x[1],
-            reverse=True
-        )
-
-        final_results = sorted_pool[:top_k]
-        return final_results if final_results else last_reranked[:top_k]
+        return best_results if best_results else reranked
