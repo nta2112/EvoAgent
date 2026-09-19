@@ -66,8 +66,8 @@ class ToolMemoryBank:
     def __init__(
         self,
         max_iterations: int = 3,
-        reward_threshold: float = 0.80,
-        initial_alpha: float = 0.5,
+        reward_threshold: float = 0.78,
+        initial_alpha: float = 0.35,
     ):
         self.max_iterations   = max_iterations
         self.reward_threshold = reward_threshold
@@ -116,12 +116,13 @@ class ToolMemoryBank:
         )
         self.history.append(record)
 
-        # If the candidate was rejected by Critic, blacklist it so it does not block
-        # better candidates (such as Ground Truth) in subsequent iterations.
-        if scalar_reward < self.reward_threshold and top_candidates:
+        # Only blacklist candidate if Critic confirms it is a clear mismatch (reward <= 0.45).
+        # Candidates with reward > 0.45 (and especially >= 0.70) must NEVER be blacklisted,
+        # as they may be Ground Truth or highly relevant targets.
+        if scalar_reward <= 0.45 and top_candidates:
             rejected_top1 = top_candidates[0]
             self.visited_negatives.add(rejected_top1)
-            print(f"[MemoryBank] Blacklisted rejected candidate: {os.path.basename(rejected_top1)}")
+            print(f"[MemoryBank] Blacklisted confirmed negative: {os.path.basename(rejected_top1)}")
 
         print(
             f"[MemoryBank] Iter {iteration} | reward={scalar_reward:.3f} | "
@@ -160,28 +161,28 @@ class ToolMemoryBank:
         last = self.history[-1]
         critique = (last.critique_summary + " " + last.critic_raw).lower()
 
-        # --- Rule 1: Visual object mismatch → boost image weight + force DET ---
-        if any(kw in critique for kw in ["visual_mismatch", "visual mismatch", "object_missing", "object", "wrong entity", "not visible"]):
-            strategy["alpha"] = min(0.80, self.alpha + 0.15)
+        # --- Rule 1: Visual context mismatch → moderate boost to image weight (safe max 0.60) ---
+        if any(kw in critique for kw in ["visual_mismatch", "visual", "appearance", "color", "background", "setting", "scene", "not match the reference image"]):
+            strategy["alpha"] = min(0.60, self.alpha + 0.10)
             strategy["force_det"] = True
-            print("[MemoryBank] Strategy: boosting image weight + enabling DET (visual mismatch).")
+            print("[MemoryBank] Strategy: moderately boosting image weight (safe max 0.60) + DET.")
 
-        # --- Rule 2: Action / temporal mismatch → boost text weight ---
+        # --- Rule 2: Action / temporal mismatch → boost text weight (safe min 0.30) ---
         elif any(kw in critique for kw in ["action_mismatch", "action", "temporal", "motion", "movement", "not demonstrated"]):
-            strategy["alpha"] = max(0.20, self.alpha - 0.15)
+            strategy["alpha"] = max(0.30, self.alpha - 0.10)
             strategy["query_expansion_hint"] = _extract_action_keywords(last.query_prompt_used)
-            print("[MemoryBank] Strategy: boosting text weight (temporal/action mismatch).")
+            print("[MemoryBank] Strategy: boosting text weight (temporal/action mismatch, safe min 0.30).")
 
         # --- Rule 3: Missing text / signs → force OCR ---
         elif any(kw in critique for kw in ["text_mismatch", "text", "sign", "written", "ocr", "read", "label"]):
             strategy["force_ocr"] = True
             print("[MemoryBank] Strategy: enabling forced OCR (text content mismatch).")
 
-        # --- Rule 4: General low score → balance equally + both DET & OCR ---
+        # --- Rule 4: General low score → balanced fusion (alpha=0.35) ---
         else:
-            strategy["alpha"] = 0.5
+            strategy["alpha"] = 0.35
             strategy["force_det"] = True
-            print("[MemoryBank] Strategy: balanced fusion + DET (generic low score).")
+            print("[MemoryBank] Strategy: balanced fusion (alpha=0.35) + DET (generic low score).")
 
         self.alpha = strategy["alpha"]  # persist for next call
         return strategy

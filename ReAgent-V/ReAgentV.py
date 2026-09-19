@@ -583,24 +583,22 @@ class ReAgentV:
         top_k: int = 5,
         top_n_coarse: int = 20,
         max_iterations: int = 3,
-        reward_threshold: float = 0.80,
+        reward_threshold: float = 0.78,
         hybrid_alpha: float = 0.25,
     ) -> List[Tuple[str, float, str]]:
         """
-        Full Two-Stage Adaptive Retrieval Loop with Memory Bank.
+        Full Two-Stage Adaptive Retrieval Loop with Memory Bank and Global Candidate Pool.
 
         1. Coarse Search (CLIP) → Top-N candidates
-        2. Agentic Reranker (LLaVA) → Top-K results
-        3. Critic Agent evaluates Top-1
-        4. If score < threshold AND iterations remaining:
-               Memory Bank adapts strategy → go to step 1
-        5. Return best Top-K result across all iterations.
-
-        Candidate Score Caching:
-            A per-query dict ``_score_cache`` maps video_path → (rel_score, verdict).
-            LLaVA inference is skipped on any subsequent iteration where a candidate
-            video was already scored in a previous round, eliminating redundant
-            decode + inference cycles and making multi-iteration retrieval much faster.
+        2. Agentic Reranker (LLaVA) → Scored Top-K results
+        3. Global Candidate Pool accumulates all scored candidates across iterations.
+        4. Critic Agent evaluates current Top-1:
+           - If reward >= threshold (e.g. 0.78): Confirmed match → Early stop.
+           - If reward <= 0.45: Confirmed mismatch → Penalize candidate score to 0.0
+             in pool so high-ranking runner-ups (e.g. Ground Truth) automatically advance!
+        5. If score < threshold AND iterations remaining:
+               Memory Bank adapts strategy → retry with reformulated query / adjusted alpha.
+        6. Return Top-K from global candidate pool sorted by final score descending.
 
         Args:
             query_image      : PIL Image (middle frame from pth1).
@@ -610,22 +608,23 @@ class ReAgentV:
             top_k            : Final number of ranked results to return.
             top_n_coarse     : Number of candidates from Stage 1.
             max_iterations   : Maximum number of adaptive retry iterations.
-            reward_threshold : Critic score above which we stop iterating.
+            reward_threshold : Critic score above which we stop iterating (default 0.78).
             hybrid_alpha     : CLIP weight in hybrid score (default 0.25).
 
         Returns:
             List of (video_path, relevance_score, verdict) — Top-K final results.
         """
         # Per-query score cache: {video_path: (rel_score, verdict)}
-        # Cleared automatically when this method returns (Python GC).
         _score_cache: Dict[str, Tuple[float, str]] = {}
         memory = ToolMemoryBank(
             max_iterations=max_iterations,
             reward_threshold=reward_threshold,
         )
 
-        best_results = []
+        # Global candidate pool across all iterations: {video_path: (final_score, verdict)}
+        candidate_pool: Dict[str, Tuple[float, str]] = {}
         best_reward = -1.0
+        last_reranked = []
 
         for iteration in range(max_iterations):
             print(f"\n[ReAgentV] === Iteration {iteration + 1}/{max_iterations} ===")
@@ -675,7 +674,7 @@ class ReAgentV:
             # Stage 2: Agentic Reranker (with shared per-query score cache)
             reranked = self.agentic_rerank(
                 query_image, query_text, coarse_results,
-                top_k=top_k, hybrid_alpha=hybrid_alpha,
+                top_k=max(top_k, 10), hybrid_alpha=hybrid_alpha,
                 score_cache=_score_cache,
             )
 
@@ -683,9 +682,16 @@ class ReAgentV:
                 print("[ReAgentV] No valid reranked results — stopping early.")
                 break
 
+            last_reranked = reranked
+
+            # Ingest all scored candidates into global candidate_pool to safeguard Recall@5 & Recall@10
+            for vpath, fscore, verd in reranked:
+                if vpath not in candidate_pool or fscore > candidate_pool[vpath][0]:
+                    candidate_pool[vpath] = (fscore, verd)
+
             top1_path = reranked[0][0]
 
-            # Stage 3: Critic Agent evaluates Top-1
+            # Stage 3: Critic Agent evaluates current Top-1
             scalar_reward, critic_raw = self.covr_critic_evaluate(
                 query_image, query_text, top1_path
             )
@@ -700,14 +706,33 @@ class ReAgentV:
                 scalar_reward=scalar_reward,
             )
 
-            # Track best result across iterations
-            if scalar_reward > best_reward:
+            if scalar_reward >= reward_threshold:
+                # Confirmed high-quality match: boost Top-1 score and stop early
                 best_reward = scalar_reward
-                best_results = reranked
+                candidate_pool[top1_path] = (max(candidate_pool[top1_path][0], 1.0), "MATCH")
+                print(f"[ReAgentV] Stopping: reward={scalar_reward:.3f} >= threshold={reward_threshold}. Confirmed Top-1!")
+                break
+            elif scalar_reward <= 0.45:
+                # Confirmed negative/mismatch: penalize score so valid candidates in pool advance
+                candidate_pool[top1_path] = (0.0, "MISMATCH")
+                print(f"[ReAgentV] Penalized rejected candidate: {os.path.basename(top1_path)} (score -> 0.0)")
+            else:
+                # Moderate score (partial match): keep in pool, track best reward
+                if scalar_reward > best_reward:
+                    best_reward = scalar_reward
 
             if not memory.should_continue(scalar_reward, iteration):
-                print(f"[ReAgentV] Stopping: reward={scalar_reward:.3f} >= threshold={reward_threshold} or max iterations reached.")
+                print(f"[ReAgentV] Stopping: max iterations reached.")
                 break
 
         print(memory.summary())
-        return best_results if best_results else reranked
+
+        # Compile final Top-K by sorting the master candidate pool
+        sorted_pool = sorted(
+            [(path, score, verd) for path, (score, verd) in candidate_pool.items()],
+            key=lambda x: x[1],
+            reverse=True
+        )
+
+        final_results = sorted_pool[:top_k]
+        return final_results if final_results else last_reranked[:top_k]
