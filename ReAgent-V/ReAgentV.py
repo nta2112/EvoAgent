@@ -515,7 +515,7 @@ class ReAgentV:
 
             prompt = covr_rerank_prompt_template.format(edit_prompt=query_text)
             try:
-                raw_output = llava_inference(prompt, combined_input)
+                raw_output = llava_inference(prompt, combined_input, max_new_tokens=32)
                 # Strip LLaVA chat-template artifacts + markdown code fences
                 cleaned = _strip_llava_output(raw_output)
                 data = json.loads(cleaned)
@@ -596,8 +596,8 @@ class ReAgentV:
         corpus_embeddings: torch.Tensor,
         corpus_paths: List[str],
         top_k: int = 5,
-        top_n_coarse: int = 20,
-        max_iterations: int = 3,
+        top_n_coarse: int = 12,
+        max_iterations: int = 2,
         reward_threshold: float = 0.85,
         hybrid_alpha: float = 0.40,
     ) -> List[Tuple[str, float, str]]:
@@ -707,6 +707,11 @@ class ReAgentV:
                 best_results = reranked
                 best_reward = scalar_reward
                 print(f"[ReAgentV] Improved results in iteration {iteration + 1} with reward {scalar_reward:.3f}")
+
+            # Stagnation early exit: if retry iteration yields no improvement over baseline, stop early
+            if iteration >= 1 and scalar_reward <= best_reward and scalar_reward < 0.50:
+                print(f"[ReAgentV] Stagnation detected (reward {scalar_reward:.3f} <= baseline {best_reward:.3f}) — stopping early to save compute.")
+                break
 
             if not memory.should_continue(scalar_reward, iteration):
                 print(f"[ReAgentV] Stopping: reward={scalar_reward:.3f} >= threshold={reward_threshold} or max iterations reached.")

@@ -61,8 +61,8 @@ def main():
     parser.add_argument("--num_samples",     type=int,   default=100,
                         help="Number of test queries to evaluate (use 2556 for full benchmark)")
     parser.add_argument("--top_k",           type=int,   default=10)
-    parser.add_argument("--top_n_coarse",    type=int,   default=20)
-    parser.add_argument("--max_iterations",  type=int,   default=3)
+    parser.add_argument("--top_n_coarse",    type=int,   default=12)
+    parser.add_argument("--max_iterations",  type=int,   default=2)
     parser.add_argument("--reward_threshold",type=float, default=0.85)
     parser.add_argument("--alpha",           type=float, default=0.50)
     parser.add_argument("--hybrid_alpha",    type=float, default=0.40,
