@@ -9,7 +9,7 @@ tokenizer = None
 model = None
 
 
-def llava_inference(qs, video):
+def llava_inference(qs, video, max_new_tokens: int = 64):
     if video is not None:
         question = DEFAULT_IMAGE_TOKEN + qs
     else:
@@ -38,7 +38,7 @@ def llava_inference(qs, video):
             images=video,
             modalities=["video"],
             do_sample=False,
-            max_new_tokens=64,
+            max_new_tokens=max_new_tokens,
             num_beams=1
         )
     else:
@@ -46,7 +46,7 @@ def llava_inference(qs, video):
             input_ids,
             attention_mask=attention_mask,
             do_sample=False,
-            max_new_tokens=64,
+            max_new_tokens=max_new_tokens,
         )
 
     text_outputs = tokenizer.batch_decode(cont, skip_special_tokens=True)[0].strip()

@@ -567,7 +567,7 @@ class ReAgentV:
             edit_prompt=query_text,
             candidate_id=candidate_id,
         )
-        critic_raw = llava_inference(prompt, combined_input)
+        critic_raw = llava_inference(prompt, combined_input, max_new_tokens=128)
         scalar_reward = _extract_scalar_reward(critic_raw)
 
         del combined, combined_input, vid_tensor, q_img_tensor

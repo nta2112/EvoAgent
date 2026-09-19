@@ -155,22 +155,22 @@ class ToolMemoryBank:
             return strategy  # First iteration — use defaults
 
         last = self.history[-1]
-        critique = last.critique_summary.lower()
+        critique = (last.critique_summary + " " + last.critic_raw).lower()
 
         # --- Rule 1: Visual object mismatch → boost image weight + force DET ---
-        if any(kw in critique for kw in ["visual mismatch", "object", "wrong entity", "not visible"]):
+        if any(kw in critique for kw in ["visual_mismatch", "visual mismatch", "object_missing", "object", "wrong entity", "not visible"]):
             strategy["alpha"] = min(0.80, self.alpha + 0.15)
             strategy["force_det"] = True
             print("[MemoryBank] Strategy: boosting image weight + enabling DET (visual mismatch).")
 
         # --- Rule 2: Action / temporal mismatch → boost text weight ---
-        elif any(kw in critique for kw in ["action", "temporal", "motion", "movement", "not demonstrated"]):
+        elif any(kw in critique for kw in ["action_mismatch", "action", "temporal", "motion", "movement", "not demonstrated"]):
             strategy["alpha"] = max(0.20, self.alpha - 0.15)
             strategy["query_expansion_hint"] = _extract_action_keywords(last.query_prompt_used)
             print("[MemoryBank] Strategy: boosting text weight (temporal/action mismatch).")
 
         # --- Rule 3: Missing text / signs → force OCR ---
-        elif any(kw in critique for kw in ["text", "sign", "written", "ocr", "read", "label"]):
+        elif any(kw in critique for kw in ["text_mismatch", "text", "sign", "written", "ocr", "read", "label"]):
             strategy["force_ocr"] = True
             print("[MemoryBank] Strategy: enabling forced OCR (text content mismatch).")
 
