@@ -17,15 +17,20 @@ starting from the state shown in the query image.
 
 covr_rerank_prompt_template = """
 [Task]
-You are a Video Retrieval Judge. Evaluate if the Candidate Video correctly demonstrates the Edit Instruction starting from the Reference Image visual context.
+You are a strict Video Retrieval Judge evaluating if the Candidate Video correctly demonstrates the Edit Instruction starting from the Reference Image visual context.
 
 [Edit Instruction]
 {edit_prompt}
 
+[Scoring Criteria]
+- PERFECT MATCH (0.90 - 1.0): The video clearly shows the target edit/action performed on or replacing the reference content.
+- PARTIAL / WRONG ACTION (0.35 - 0.55): The video has similar scene/background but fails the specific edit, shows wrong entities, or fails the action.
+- NO MATCH (0.0 - 0.20): Unchanged scene, irrelevant action, or fails the core edit instruction.
+
 [Output Format]
 Output ONLY a concise JSON object with no explanations or reasons:
 {{
-  "relevance_score": <float from 0.0 to 1.0>,
+  "relevance_score": <float from 0.0 to 1.0 based on criteria above>,
   "verdict": "<MATCH | PARTIAL_MATCH | NO_MATCH>"
 }}
 """
@@ -74,17 +79,18 @@ Return ONLY a valid JSON object. Put scalar_reward on the FIRST line:
 
 covr_query_expansion_template = """
 [Task]
-You are a Query Expansion assistant for a Video Retrieval system.
+You are an expert Query Reformulator for a Video Retrieval system.
+Given an Edit Instruction that describes how to transform a reference image into a target video, describe what the TARGET VIDEO looks like.
 
-Given the original Edit Instruction below, generate an expanded version with:
-- Alternative phrasings of the main action or change
-- Relevant visual synonyms or related concepts
-- Scene context keywords that would help find the target video
+[Rules]
+- Describe the NEW object, NEW action, or NEW visual state that MUST be visible in the target video.
+- Do NOT mention the removed or replaced entity (e.g. for "replace cow with goat", describe "a goat in the pasture", do NOT include "cow").
+- Include visual synonyms, scene setting, and physical details of the target video.
 
 [Original Edit Instruction]
 {edit_prompt}
 
 [Output Format]
-Return ONLY a single expanded query string (no explanation, no JSON), maximum 25 words.
-Example: "replace cow with goat" → "goat instead of cow, farm animal substitution, pastoral scene livestock change"
+Return ONLY a single descriptive query string for the TARGET video, maximum 20 words.
+Example: "replace cow with goat" → "a goat standing in a green pasture, livestock grazing on farm, animal"
 """

@@ -325,13 +325,13 @@ class ReAgentV:
 
         # Format text with context prefix to align with target video representations
         clean_text = query_text.strip()
-        if not clean_text.lower().startswith("a video of") and not clean_text.lower().startswith("a video showing"):
+        if query_expansion_hint:
+            # When target-focused expansion is available, use it directly as the target text description
+            full_text = f"a video showing {query_expansion_hint.strip()}"
+        elif not clean_text.lower().startswith("a video of") and not clean_text.lower().startswith("a video showing"):
             full_text = f"a video showing {clean_text}"
         else:
             full_text = clean_text
-
-        if query_expansion_hint:
-            full_text = f"{full_text}, {query_expansion_hint.strip()}"
 
         with torch.no_grad():
             # Image branch
@@ -401,8 +401,8 @@ class ReAgentV:
             total_frames = len(vr)
             if total_frames == 0:
                 return None
-            # Uniformly sample 2 keyframes across the video duration for fast inference
-            num_samples = min(2, total_frames)
+            # Uniformly sample 4 keyframes across the video duration for temporal awareness
+            num_samples = min(4, total_frames)
             indices = np.linspace(0, total_frames - 1, num_samples, dtype=int).tolist()
             sampled_np = vr.get_batch(indices).asnumpy()
             key_frames = [Image.fromarray(f) for f in sampled_np]
@@ -638,21 +638,23 @@ class ReAgentV:
             force_ocr      = strategy["force_ocr"]
             force_det      = strategy["force_det"]
 
-            # Optionally expand query via LLaVA if hint is requested
+            # In retry iterations, reformulate query via LLaVA to focus on target video
             expanded_text = query_text
-            if iteration > 0 and not hint:
+            if iteration > 0:
                 try:
                     expansion_prompt = covr_query_expansion_template.format(
                         edit_prompt=query_text
                     )
-                    raw_hint = llava_inference(expansion_prompt, None).strip()
+                    raw_hint = llava_inference(expansion_prompt, None, max_new_tokens=64).strip()
                     # Clean any chat template artifact (e.g. system\n...assistant\n)
                     if "assistant\n" in raw_hint:
                         raw_hint = raw_hint.split("assistant\n")[-1].strip()
-                    hint = raw_hint.replace("\n", " ")[:100].strip()
-                    print(f"[ReAgentV] Query expanded: '{hint}'")
-                except Exception:
-                    pass
+                    hint_clean = raw_hint.replace("\n", " ").strip().strip('"\'')
+                    if hint_clean:
+                        hint = hint_clean[:120].strip()
+                        print(f"[ReAgentV] Target-focused Query Expansion: '{hint}'")
+                except Exception as e:
+                    print(f"[ReAgentV] Query expansion fallback: {e}")
 
             tools_used = ["CLIP_coarse"]
             if force_det:
