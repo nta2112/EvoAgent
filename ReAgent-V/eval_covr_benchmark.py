@@ -105,13 +105,26 @@ def main():
     per_query_results = []
     start_time = time.time()
 
-    for i, row in tqdm(df.iterrows(), total=total, desc="Evaluating"):
-        query_image, query_text, gt_video_path = get_covr_query(row)
+    # Asynchronous query prefetching: background thread decodes query i+1 while GPU processes query i
+    from concurrent.futures import ThreadPoolExecutor
+    rows = [row for _, row in df.iterrows()]
 
-        if query_image is None or not os.path.exists(gt_video_path):
-            clip_ranks.append(None)
-            agent_ranks.append(None)
-            continue
+    with ThreadPoolExecutor(max_workers=2) as prefetcher:
+        next_query_future = prefetcher.submit(get_covr_query, rows[0]) if total > 0 else None
+
+        for i in tqdm(range(total), total=total, desc="Evaluating"):
+            row = rows[i]
+            query_image, query_text, gt_video_path = next_query_future.result() if next_query_future else get_covr_query(row)
+
+            if i + 1 < total:
+                next_query_future = prefetcher.submit(get_covr_query, rows[i + 1])
+            else:
+                next_query_future = None
+
+            if query_image is None or not os.path.exists(gt_video_path):
+                clip_ranks.append(None)
+                agent_ranks.append(None)
+                continue
 
         gt_norm = os.path.normpath(gt_video_path)
         gt_base = os.path.basename(gt_norm)

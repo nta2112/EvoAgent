@@ -391,6 +391,21 @@ def load_default(path_dict):
     # Chat template
     conv_template = "qwen_1_5"
 
+    if torch.cuda.is_available():
+        num_gpus = torch.cuda.device_count()
+        print(f"\n=======================================================")
+        print(f"🚀 [Dual-GPU Status] Phat hien {num_gpus} GPU CUDA kha dung:")
+        for i in range(num_gpus):
+            props = torch.cuda.get_device_properties(i)
+            allocated = torch.cuda.memory_allocated(i) / (1024 ** 3)
+            reserved = torch.cuda.memory_reserved(i) / (1024 ** 3)
+            total = props.total_memory / (1024 ** 3)
+            print(f"  • GPU {i} [{props.name}]: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved / {total:.2f} GB total")
+        if hasattr(model, "hf_device_map"):
+            devices_used = set(str(v) for v in model.hf_device_map.values())
+            print(f"  • LLaVA-Video-7B (FP16) sharded across: {sorted(list(devices_used))}")
+        print(f"=======================================================\n")
+
     return {
         "clip_model": clip_model,
         "clip_processor": clip_processor,

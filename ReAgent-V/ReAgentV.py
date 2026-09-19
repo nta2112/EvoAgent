@@ -5,6 +5,7 @@ import socket
 import ast
 import copy
 from typing import List, Optional, Tuple, Dict, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import cv2
 import torch
@@ -392,14 +393,23 @@ class ReAgentV:
         results = [(corpus_paths[i], float(sims[i])) for i in top_indices]
         return results
 
-    def _video_to_tensor(self, video_path: str) -> Optional[List[torch.Tensor]]:
+    def _video_to_tensor(
+        self,
+        video_path: str,
+        tensor_cache: Optional[Dict[str, List[torch.Tensor]]] = None,
+    ) -> Optional[List[torch.Tensor]]:
         """
         Load a candidate video and convert it to the video tensor format
         expected by LLaVA (same as load_and_sample_video output).
         Returns None if the video cannot be loaded.
+        Reuses tensor_cache if available to eliminate redundant decodes.
         """
+        if tensor_cache is not None and video_path in tensor_cache:
+            return tensor_cache[video_path]
+
         try:
-            vr = VideoReader(video_path, ctx=cpu(), num_threads=1)
+            # num_threads=0 automatically utilizes all available CPU cores for maximum decode speed
+            vr = VideoReader(video_path, ctx=cpu(), num_threads=0)
             total_frames = len(vr)
             if total_frames == 0:
                 return None
@@ -420,7 +430,10 @@ class ReAgentV:
                 self.image_processor.preprocess(key_frames, return_tensors="pt")["pixel_values"]
                 .to(dev, dtype=torch.float16)
             )
-            return [vid_tensor]
+            res = [vid_tensor]
+            if tensor_cache is not None:
+                tensor_cache[video_path] = res
+            return res
         except Exception as e:
             print(f"[ReAgentV] _video_to_tensor failed for {video_path}: {e}")
             return None
@@ -433,6 +446,7 @@ class ReAgentV:
         top_k: int = 5,
         hybrid_alpha: float = 0.25,
         score_cache: Optional[Dict[str, Tuple[float, str]]] = None,
+        tensor_cache: Optional[Dict[str, List[torch.Tensor]]] = None,
     ) -> List[Tuple[str, float, str]]:
         """
         Stage 2 — Fine-grained Agentic Reranking using LLaVA + Hybrid Scoring.
@@ -440,26 +454,9 @@ class ReAgentV:
         Combines CLIP visual similarity with LLaVA action/edit relevance:
             final_score = hybrid_alpha * clip_score + (1 - hybrid_alpha) * rel_score
 
-        This breaks score ties when LLaVA assigns identical relevance to multiple
-        candidates, preventing false rank drops in Recall@5 and Recall@10.
-
-        Candidate Score Caching:
-            If score_cache is provided (a dict), LLaVA inference is skipped for
-            any video_path already present in the cache. The cached (rel_score,
-            verdict) pair is reused directly, saving one full decode + inference
-            cycle per repeated candidate across iterations.
-
-        Args:
-            query_image    : PIL Image (query image / reference frame).
-            query_text     : Edit instruction string.
-            candidate_list : Output of coarse_search() — list of (path, clip_sim).
-            top_k          : How many final results to return.
-            hybrid_alpha   : Weight for CLIP similarity (default 0.25).
-            score_cache    : Optional shared dict {video_path: (rel_score, verdict)}
-                             populated and read across iterations for the same query.
-
-        Returns:
-            List of (video_path, final_score, verdict) sorted descending.
+        Asynchronous Parallel Prefetching:
+            Candidate videos needing LLaVA inference are pre-decoded in parallel across
+            CPU cores using ThreadPoolExecutor, eliminating GPU idle wait times.
         """
         import re
 
@@ -480,6 +477,20 @@ class ReAgentV:
             .to(dev, dtype=torch.float16)
         )  # [1, C, H, W]
 
+        # ── Parallel CPU Video Prefetching: decode uncached candidate videos ahead of GPU inference ──
+        uncached_paths = [
+            vpath for vpath, _ in candidate_list
+            if vpath not in score_cache and (tensor_cache is None or vpath not in tensor_cache)
+        ]
+        if uncached_paths:
+            with ThreadPoolExecutor(max_workers=min(4, len(uncached_paths))) as executor:
+                futures = [executor.submit(self._video_to_tensor, p, tensor_cache) for p in uncached_paths]
+                for f in futures:
+                    try:
+                        f.result()
+                    except Exception:
+                        pass
+
         reranked = []
         for video_path, clip_score in candidate_list:
 
@@ -491,8 +502,8 @@ class ReAgentV:
                 reranked.append((video_path, round(final_score, 4), verdict))
                 continue
 
-            # ── Cache MISS: run LLaVA inference and populate cache ─────────────
-            vid_tensor = self._video_to_tensor(video_path)
+            # ── Cache MISS: retrieve prefetched tensor and run LLaVA inference ──
+            vid_tensor = self._video_to_tensor(video_path, tensor_cache=tensor_cache)
             if vid_tensor is None:
                 score_cache[video_path] = (0.0, "NO_MATCH")
                 reranked.append((video_path, 0.0, "NO_MATCH"))
@@ -526,9 +537,9 @@ class ReAgentV:
             # Hybrid scoring: blend CLIP similarity with LLaVA relevance
             final_score = hybrid_alpha * float(clip_score) + (1.0 - hybrid_alpha) * rel_score
             reranked.append((video_path, round(final_score, 4), verdict))
-            del vid_tensor, combined_tensor, combined_input
+            del combined_tensor, combined_input
 
-        # Single cache cleanup after all candidates are scored
+        # Cleanup GPU cache
         torch.cuda.empty_cache()
 
         # Sort by hybrid final_score descending
@@ -540,10 +551,12 @@ class ReAgentV:
         query_image: Image.Image,
         query_text: str,
         top1_video_path: str,
+        tensor_cache: Optional[Dict[str, List[torch.Tensor]]] = None,
     ) -> Tuple[float, str]:
         """
         Run the Critic Agent on the current Top-1 retrieval result.
         Returns (scalar_reward, critic_raw_json) for the Memory Bank.
+        Reuses tensor_cache from Stage 2 to eliminate redundant video decode.
         """
         try:
             dev = next(
@@ -557,7 +570,7 @@ class ReAgentV:
             self.image_processor.preprocess([query_image], return_tensors="pt")["pixel_values"]
             .to(dev, dtype=torch.float16)
         )
-        vid_tensor = self._video_to_tensor(top1_video_path)
+        vid_tensor = self._video_to_tensor(top1_video_path, tensor_cache=tensor_cache)
         if vid_tensor is None:
             return 0.0, '{"scalar_reward": 0.0, "structured_feedback": "Video could not be loaded."}'
 
@@ -572,7 +585,7 @@ class ReAgentV:
         critic_raw = llava_inference(prompt, combined_input, max_new_tokens=128)
         scalar_reward = _extract_scalar_reward(critic_raw)
 
-        del combined, combined_input, vid_tensor, q_img_tensor
+        del combined, combined_input, q_img_tensor
         torch.cuda.empty_cache()
         return scalar_reward, critic_raw
 
@@ -592,29 +605,16 @@ class ReAgentV:
         Full Two-Stage Adaptive Retrieval Loop with Memory Bank.
 
         1. Coarse Search (CLIP) → Top-N candidates
-        2. Agentic Reranker (LLaVA) → Top-K ranked results
-        3. Critic Agent evaluates Top-1 result.
+        2. Agentic Reranker (LLaVA) → Top-K ranked results with parallel prefetching
+        3. Critic Agent evaluates Top-1 result (instant tensor cache reuse)
         4. If score >= reward_threshold: Early stop (Confirmed High-Quality Hit).
         5. Preserves the clean iteration 0 results (which rely on ground-truth edit prompt)
            to safeguard Recall@5 and Recall@10, only superseding if a retry iteration
            achieves a definitively superior score (>= reward_threshold).
-
-        Args:
-            query_image      : PIL Image (middle frame from pth1).
-            query_text       : Edit instruction from CSV column 'edit'.
-            corpus_embeddings: Tensor [N, D] from load_corpus_index().
-            corpus_paths     : List of N video paths.
-            top_k            : Final number of ranked results to return.
-            top_n_coarse     : Number of candidates from Stage 1.
-            max_iterations   : Maximum number of adaptive retry iterations.
-            reward_threshold : Critic score above which we stop iterating (default 0.85).
-            hybrid_alpha     : CLIP weight in hybrid score (default 0.25).
-
-        Returns:
-            List of (video_path, relevance_score, verdict) — Top-K final results.
         """
-        # Per-query score cache: {video_path: (rel_score, verdict)}
+        # Per-query score and tensor caches:
         _score_cache: Dict[str, Tuple[float, str]] = {}
+        _tensor_cache: Dict[str, List[torch.Tensor]] = {}
         memory = ToolMemoryBank(
             max_iterations=max_iterations,
             reward_threshold=reward_threshold,
@@ -643,7 +643,6 @@ class ReAgentV:
                         edit_prompt=query_text
                     )
                     raw_hint = llava_inference(expansion_prompt, None, max_new_tokens=64).strip()
-                    # Clean any chat template artifact (e.g. system\n...assistant\n)
                     if "assistant\n" in raw_hint:
                         raw_hint = raw_hint.split("assistant\n")[-1].strip()
                     hint_clean = raw_hint.replace("\n", " ").strip().strip('"\'')
@@ -669,11 +668,12 @@ class ReAgentV:
                 exclude_paths=exclude_paths,
             )
 
-            # Stage 2: Agentic Reranker (with shared per-query score cache)
+            # Stage 2: Agentic Reranker (with parallel prefetching + score cache)
             reranked = self.agentic_rerank(
                 query_image, query_text, coarse_results,
                 top_k=top_k, hybrid_alpha=hybrid_alpha,
                 score_cache=_score_cache,
+                tensor_cache=_tensor_cache,
             )
 
             if not reranked:
@@ -682,9 +682,10 @@ class ReAgentV:
 
             top1_path = reranked[0][0]
 
-            # Stage 3: Critic Agent evaluates current Top-1
+            # Stage 3: Critic Agent evaluates current Top-1 (reuses prefetched tensor)
             scalar_reward, critic_raw = self.covr_critic_evaluate(
-                query_image, query_text, top1_path
+                query_image, query_text, top1_path,
+                tensor_cache=_tensor_cache,
             )
 
             candidate_paths = [r[0] for r in reranked]
