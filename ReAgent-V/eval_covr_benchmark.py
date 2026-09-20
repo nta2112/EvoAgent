@@ -29,7 +29,11 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from ReAgentV import ReAgentV
-from ReAgentV_utils.video_processor.covr_loader import load_covr_annotations, get_covr_query
+from ReAgentV_utils.video_processor.covr_loader import (
+    load_covr_annotations,
+    get_covr_query,
+    build_synchronized_subcorpus,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +64,8 @@ def main():
     parser.add_argument("--llava_model",     type=str,   default="/kaggle/input/covr-models/LLaVA-Video-7B-Qwen2")
     parser.add_argument("--num_samples",     type=int,   default=100,
                         help="Number of test queries to evaluate (use 2556 for full benchmark)")
+    parser.add_argument("--target_corpus_size", type=int, default=None,
+                        help="Optional: shrink corpus size (e.g. 300, 500) while guaranteeing 100% ground-truth presence")
     parser.add_argument("--top_k",           type=int,   default=10)
     parser.add_argument("--top_n_coarse",    type=int,   default=12)
     parser.add_argument("--max_iterations",  type=int,   default=2)
@@ -94,7 +100,19 @@ def main():
     # ------------------------------------------------------------------
     df = load_covr_annotations(args.csv_path, args.video_dir, num_samples=args.num_samples)
     total = len(df)
-    print(f"Evaluating on {total} queries | top_k={args.top_k} | max_iter={args.max_iterations}")
+
+    # ------------------------------------------------------------------
+    # 2b. Synchronized Sub-corpus filtering (if target_corpus_size set)
+    # ------------------------------------------------------------------
+    if args.target_corpus_size is not None and args.target_corpus_size < len(corpus_paths):
+        corpus_embeddings, corpus_paths = build_synchronized_subcorpus(
+            df=df,
+            corpus_embeddings=corpus_embeddings,
+            corpus_paths=corpus_paths,
+            target_corpus_size=args.target_corpus_size,
+        )
+
+    print(f"Evaluating on {total} queries | Corpus: {len(corpus_paths)} videos | top_k={args.top_k} | max_iter={args.max_iterations}")
     print("=" * 70)
 
     # ------------------------------------------------------------------

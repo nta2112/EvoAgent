@@ -115,3 +115,82 @@ def get_covr_query(row: pd.Series):
     query_prompt = str(row["edit"]).strip()
     target_video_path = row["target_video_path"]
     return query_image, query_prompt, target_video_path
+
+
+def build_synchronized_subcorpus(
+    df: pd.DataFrame,
+    corpus_embeddings: "torch.Tensor",
+    corpus_paths: list,
+    target_corpus_size: Optional[int] = None,
+) -> tuple:
+    """
+    Build a synchronized sub-corpus index guaranteeing that 100% of the Ground-Truth
+    target videos required by `df` are present in the corpus, augmented with distractor
+    videos up to `target_corpus_size`.
+
+    Args:
+        df                 : DataFrame of queries to test (subset of CoVR test).
+        corpus_embeddings  : Full corpus embedding tensor [N, D].
+        corpus_paths       : List of full corpus video paths [N].
+        target_corpus_size : Desired total videos in the sub-corpus (e.g. 200, 500).
+                             If None or <= number of unique ground truths, keeps only
+                             the ground truths and necessary reference videos.
+
+    Returns:
+        (sub_embeddings, sub_paths): Tuple with filtered embedding tensor and path list.
+    """
+    import torch
+
+    # Collect ground-truth paths needed for 100% recall feasibility
+    gt_set = set(os.path.normpath(p) for p in df["target_video_path"])
+    norm_corpus = [os.path.normpath(p) for p in corpus_paths]
+    
+    # Map normalized path to index in original corpus
+    corpus_map = {p: i for i, p in enumerate(norm_corpus)}
+
+    chosen_indices = []
+    missing_gt_count = 0
+
+    # Ensure all target videos are included first
+    for gt in gt_set:
+        if gt in corpus_map:
+            chosen_indices.append(corpus_map[gt])
+        else:
+            # Fallback by basename if path structures differ
+            gt_base = os.path.basename(gt)
+            matched = False
+            for idx, cp in enumerate(norm_corpus):
+                if os.path.basename(cp) == gt_base:
+                    chosen_indices.append(idx)
+                    matched = True
+                    break
+            if not matched:
+                missing_gt_count += 1
+
+    if missing_gt_count > 0:
+        print(f"[CoVR Subcorpus] WARNING: {missing_gt_count} ground-truth videos were not found in the corpus index.")
+
+    # Deduplicate while preserving order
+    chosen_set = set(chosen_indices)
+    chosen_indices = list(dict.fromkeys(chosen_indices))
+
+    print(f"[CoVR Subcorpus] Guaranteed {len(chosen_indices)} Ground-Truth target videos included.")
+
+    # Add distractors if target_corpus_size is larger than required ground truths
+    if target_corpus_size is not None and target_corpus_size > len(chosen_indices):
+        distractor_count = target_corpus_size - len(chosen_indices)
+        for idx in range(len(corpus_paths)):
+            if idx not in chosen_set:
+                chosen_indices.append(idx)
+                chosen_set.add(idx)
+                if len(chosen_indices) >= target_corpus_size:
+                    break
+        print(f"[CoVR Subcorpus] Added distractors to reach target size: {len(chosen_indices)} total videos.")
+    else:
+        print(f"[CoVR Subcorpus] Final corpus size: {len(chosen_indices)} videos.")
+
+    sub_embeddings = corpus_embeddings[chosen_indices]
+    sub_paths = [corpus_paths[i] for i in chosen_indices]
+
+    return sub_embeddings, sub_paths
+
