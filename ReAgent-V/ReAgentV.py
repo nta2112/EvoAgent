@@ -30,6 +30,7 @@ from ReAgentV_utils.prompt_builder.covr_prompt import (
     covr_critic_prompt_template,
     covr_query_expansion_template,
     covr_reason_target_prompt_template,
+    covr_pairwise_tournament_template,
 )
 from ReAgentV_utils.frame_selection_ecrs.ECRS_frame_selection import select_keyframes
 from ReAgentV_utils.video_processor.process_video import load_video_frames
@@ -469,27 +470,38 @@ class ReAgentV:
         # Fast GPU/CPU cosine similarity against entire corpus [N]
         sims_composed = (corpus_embeddings @ query_feat.T).squeeze(-1)  # [N]
 
+        # VRAgent-inspired Target Scene Alignment:
+        # If reasoned_description is present, also compute direct text-to-video alignment
+        # to ensure new target entities (goats, horses, Mars) strongly lead candidate selection.
+        if reasoned_description:
+            with torch.no_grad():
+                target_text = f"a video showing {reasoned_description.strip()}"
+                target_inputs = self.clip_processor(
+                    text=[target_text], return_tensors="pt",
+                    padding=True, truncation=True, max_length=77,
+                )
+                target_inputs = {k: v.to(clip_device) for k, v in target_inputs.items()}
+                target_feat = self.clip_model.get_text_features(**target_inputs)
+                target_feat = F.normalize(target_feat.float(), dim=-1).cpu()
+
+            sims_target = (corpus_embeddings @ target_feat.T).squeeze(-1)
+            sims_final = 0.60 * sims_target + 0.40 * sims_composed
+        else:
+            sims_final = sims_composed
+
         # Exclude previously rejected candidates
         if exclude_paths:
             for i, vp in enumerate(corpus_paths):
                 if vp in exclude_paths:
-                    sims_composed[i] = -1.0
+                    sims_final[i] = -1.0
 
         # Step 1: Broad Candidate Pool (Top-M, e.g. 50-100 videos)
         pool_m = min(max(candidate_pool_size, top_n), len(corpus_paths))
-        pool_indices = torch.topk(sims_composed, k=pool_m).indices
+        pool_indices = torch.topk(sims_final, k=pool_m).indices
 
-        # If pool size equals desired top_n, directly return
-        if pool_m <= top_n:
-            results = [(corpus_paths[i], float(sims_composed[i])) for i in pool_indices.tolist()[:top_n]]
-            return results
-
-        # Step 2: Intent-Focused Pre-ranking
-        # When reasoned_description is present, sims_composed is already highly target-aligned.
-        # We preserve the top candidates according to the target composed similarity,
-        # avoiding biasing back towards the unmodified reference image.
+        # Step 2: Extract top-N candidate paths and scores
         top_sub_indices = pool_indices[:top_n].tolist()
-        results = [(corpus_paths[idx], float(sims_composed[idx])) for idx in top_sub_indices]
+        results = [(corpus_paths[idx], float(sims_final[idx])) for idx in top_sub_indices]
         return results
 
     def _video_to_tensor(
@@ -537,6 +549,80 @@ class ReAgentV:
             print(f"[ReAgentV] _video_to_tensor failed for {video_path}: {e}")
             return None
 
+    def pairwise_tie_break(
+        self,
+        query_image: Image.Image,
+        query_text: str,
+        cand_a_path: str,
+        cand_b_path: str,
+        tensor_cache: Optional[Dict[str, List[torch.Tensor]]] = None,
+    ) -> Tuple[str, float, str]:
+        """
+        VRAgent-inspired Pairwise Tournament Tie-Breaker.
+        Directly compares Candidate A and Candidate B head-to-head in a single prompt
+        (1 query image + 2 frames from A + 2 frames from B = 5 frames) to break ties
+        between near-identical sister clips.
+
+        Visual Input Layout:
+        - Frame 1: Reference Image (starting state)
+        - Frames 2, 3: Candidate Video A keyframes
+        - Frames 4, 5: Candidate Video B keyframes
+
+        Returns:
+            (winner, confidence, reason) where winner in {"A", "B"}
+        """
+        import re
+
+        try:
+            dev = next(
+                p.device for p in self.model.parameters()
+                if not p.is_meta and p.device.type == "cuda"
+            )
+        except StopIteration:
+            dev = torch.device("cuda:0")
+
+        q_img_tensor = (
+            self.image_processor.preprocess([query_image], return_tensors="pt")["pixel_values"]
+            .to(dev, dtype=torch.float16)
+        )
+
+        vid_a_tensor = self._video_to_tensor(cand_a_path, tensor_cache=tensor_cache)
+        vid_b_tensor = self._video_to_tensor(cand_b_path, tensor_cache=tensor_cache)
+
+        if vid_a_tensor is None or vid_b_tensor is None:
+            del q_img_tensor
+            return "A", 0.5, "Failed to load candidate video tensors"
+
+        # Extract 2 representative keyframes each (total frames = 1 + 2 + 2 = 5)
+        frames_a = vid_a_tensor[0][:2] if vid_a_tensor[0].shape[0] >= 2 else vid_a_tensor[0]
+        frames_b = vid_b_tensor[0][:2] if vid_b_tensor[0].shape[0] >= 2 else vid_b_tensor[0]
+
+        combined_tensor = torch.cat([q_img_tensor, frames_a, frames_b], dim=0)
+        combined_input = [combined_tensor]
+
+        prompt = covr_pairwise_tournament_template.format(edit_prompt=query_text)
+        try:
+            raw_output = llava_inference(prompt, combined_input, max_new_tokens=64)
+            cleaned = _strip_llava_output(raw_output)
+            data = json.loads(cleaned)
+            preferred = str(data.get("preferred", "A")).strip().upper()
+            confidence = float(data.get("confidence", 0.5))
+            reason = str(data.get("reason", ""))
+        except Exception:
+            m_pref = re.search(r'"?preferred"?\s*:\s*"?(A|B)"?', raw_output if 'raw_output' in locals() else "", re.IGNORECASE)
+            m_conf = re.search(r'"?confidence"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output if 'raw_output' in locals() else "")
+            preferred = m_pref.group(1).upper() if m_pref else "A"
+            confidence = float(m_conf.group(1)) if m_conf else 0.5
+            reason = "Parsed via fallback regex"
+
+        del combined_tensor, combined_input, q_img_tensor
+        torch.cuda.empty_cache()
+
+        if preferred not in ("A", "B"):
+            preferred = "A"
+
+        return preferred, confidence, reason
+
     def agentic_rerank(
         self,
         query_image: Image.Image,
@@ -546,17 +632,20 @@ class ReAgentV:
         hybrid_alpha: float = 0.70,
         score_cache: Optional[Dict[str, Tuple[float, str]]] = None,
         tensor_cache: Optional[Dict[str, List[torch.Tensor]]] = None,
+        enable_tournament: bool = True,
     ) -> List[Tuple[str, float, str]]:
         """
-        Stage 2 — Fine-grained Agentic Reranking using LLaVA + Hybrid Scoring.
+        Stage 2 — Fine-grained Agentic Reranking using LLaVA + Reciprocal Rank Fusion + Pairwise Tournament.
 
-        Combines CLIP visual similarity with LLaVA action/edit relevance:
-            final_score = hybrid_alpha * clip_score + (1 - hybrid_alpha) * rel_score
-            (Default hybrid_alpha = 0.70: 70% CLIP visual foundation + 30% LLaVA verifier)
-
-        Asynchronous Parallel Prefetching:
-            Candidate videos needing LLaVA inference are pre-decoded in parallel across
-            CPU cores using ThreadPoolExecutor, eliminating GPU idle wait times.
+        1. LLaVA Fine-Grained Verification:
+           Each candidate is verified against the edit instruction.
+           Candidates judged NO_MATCH receive heavy penalization.
+        2. Reciprocal Rank Fusion (RRF):
+           Combines CLIP visual ranking and LLaVA semantic ranking to prevent discrete
+           score jumps from dominating while preserving continuous discriminability.
+        3. Pairwise Tournament Tie-Breaker:
+           Direct head-to-head comparison between Top-1 and Top-2 when scores are close,
+           resolving the deadlock between near-identical sister clips.
         """
         import re
 
@@ -591,22 +680,31 @@ class ReAgentV:
                     except Exception:
                         pass
 
-        reranked = []
+        evaluated_candidates = []
         for video_path, clip_score in candidate_list:
 
             # ── Cache HIT: reuse previously computed LLaVA score ──────────────
             if video_path in score_cache:
                 rel_score, verdict = score_cache[video_path]
-                print(f"[Cache HIT] {os.path.basename(video_path)} rel={rel_score:.3f}")
-                final_score = hybrid_alpha * float(clip_score) + (1.0 - hybrid_alpha) * rel_score
-                reranked.append((video_path, round(final_score, 4), verdict))
+                print(f"[Cache HIT] {os.path.basename(video_path)} rel={rel_score:.3f} ({verdict})")
+                evaluated_candidates.append({
+                    "path": video_path,
+                    "clip_score": float(clip_score),
+                    "rel_score": rel_score,
+                    "verdict": verdict,
+                })
                 continue
 
             # ── Cache MISS: retrieve prefetched tensor and run LLaVA inference ──
             vid_tensor = self._video_to_tensor(video_path, tensor_cache=tensor_cache)
             if vid_tensor is None:
                 score_cache[video_path] = (0.0, "NO_MATCH")
-                reranked.append((video_path, 0.0, "NO_MATCH"))
+                evaluated_candidates.append({
+                    "path": video_path,
+                    "clip_score": float(clip_score),
+                    "rel_score": 0.0,
+                    "verdict": "NO_MATCH",
+                })
                 continue
 
             # Build combined vision input: [query_frame + video_frames]
@@ -616,14 +714,12 @@ class ReAgentV:
             prompt = covr_rerank_prompt_template.format(edit_prompt=query_text)
             try:
                 raw_output = llava_inference(prompt, combined_input, max_new_tokens=32)
-                # Strip LLaVA chat-template artifacts + markdown code fences
                 cleaned = _strip_llava_output(raw_output)
                 data = json.loads(cleaned)
                 rel_score = float(data.get("relevance_score", clip_score))
                 verdict = data.get("verdict", "PARTIAL_MATCH")
             except Exception:
-                # Fallback on regex if JSON parsing fails
-                m = re.search(r'"?relevance_score"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output)
+                m = re.search(r'"?relevance_score"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output if 'raw_output' in locals() else "")
                 if m:
                     rel_score = float(m.group(1))
                     verdict = "PARTIAL_MATCH"
@@ -633,17 +729,92 @@ class ReAgentV:
 
             # Store in cache for future iterations
             score_cache[video_path] = (rel_score, verdict)
-
-            # Hybrid scoring: blend CLIP similarity with LLaVA relevance
-            final_score = hybrid_alpha * float(clip_score) + (1.0 - hybrid_alpha) * rel_score
-            reranked.append((video_path, round(final_score, 4), verdict))
+            evaluated_candidates.append({
+                "path": video_path,
+                "clip_score": float(clip_score),
+                "rel_score": rel_score,
+                "verdict": verdict,
+            })
             del combined_tensor, combined_input
 
-        # Cleanup GPU cache
+        # Cleanup GPU cache after pointwise scoring
+        del q_img_tensor
         torch.cuda.empty_cache()
 
-        # Sort by hybrid final_score descending
+        # ── VRAgent-inspired Reciprocal Rank Fusion (RRF) + Continuous Hybrid Blending ──
+        # 1. Rank by CLIP similarity descending
+        clip_sorted = sorted(evaluated_candidates, key=lambda x: x["clip_score"], reverse=True)
+        clip_rank_map = {item["path"]: rank + 1 for rank, item in enumerate(clip_sorted)}
+
+        # 2. Rank by LLaVA relevance descending (penalizing NO_MATCH)
+        llava_sorted = sorted(
+            evaluated_candidates,
+            key=lambda x: (0.0 if x["verdict"] == "NO_MATCH" else x["rel_score"]),
+            reverse=True
+        )
+        llava_rank_map = {}
+        for rank, item in enumerate(llava_sorted):
+            llava_rank_map[item["path"]] = (rank + 1) if item["verdict"] != "NO_MATCH" else 99
+
+        # 3. Compute hybrid and RRF fusion scores
+        k_rrf = 20.0
+        max_rrf = (0.5 / (k_rrf + 1)) + (0.5 / (k_rrf + 1))  # ~0.0476
+        reranked = []
+
+        for item in evaluated_candidates:
+            path = item["path"]
+            r_c = clip_rank_map[path]
+            r_l = llava_rank_map[path]
+
+            rrf = (0.5 / (k_rrf + r_c)) + (0.5 / (k_rrf + r_l))
+            rrf_norm = rrf / max_rrf
+
+            effective_rel = min(item["rel_score"] * 0.3, 0.2) if item["verdict"] == "NO_MATCH" else item["rel_score"]
+            linear_hybrid = hybrid_alpha * item["clip_score"] + (1.0 - hybrid_alpha) * effective_rel
+            if item["verdict"] == "NO_MATCH":
+                linear_hybrid *= 0.3
+
+            final_score = 0.60 * linear_hybrid + 0.40 * rrf_norm
+            reranked.append((path, round(final_score, 4), item["verdict"]))
+
+        # Sort by final fused score descending
         reranked.sort(key=lambda x: x[1], reverse=True)
+
+        # ── VRAgent-inspired Pairwise Tournament Tie-Breaker for Top-2 Candidates ──
+        if enable_tournament and len(reranked) >= 2:
+            c1_path, score_1, verdict_1 = reranked[0]
+            c2_path, score_2, verdict_2 = reranked[1]
+            score_margin = score_1 - score_2
+
+            rel_1 = score_cache.get(c1_path, (0.0, ""))[0]
+            rel_2 = score_cache.get(c2_path, (0.0, ""))[0]
+
+            # Trigger tournament when Top-1 and Top-2 are in close competition:
+            # 1) Score margin is narrow (<= 0.035), OR
+            # 2) Both are high-relevance matches (>= 0.70) with margin <= 0.06, OR
+            # 3) Both achieved "MATCH" verdict with margin <= 0.06
+            trigger_tournament = (
+                (score_margin <= 0.035) or
+                (rel_1 >= 0.70 and rel_2 >= 0.70 and score_margin <= 0.06) or
+                (verdict_1 == "MATCH" and verdict_2 == "MATCH" and score_margin <= 0.06)
+            )
+
+            if trigger_tournament:
+                print(f"\n[ReAgentV Tournament] Top-2 tie-break triggered (margin={score_margin:.4f}):")
+                print(f"  Candidate A: {os.path.basename(c1_path)} (score={score_1:.4f}, rel={rel_1:.2f})")
+                print(f"  Candidate B: {os.path.basename(c2_path)} (score={score_2:.4f}, rel={rel_2:.2f})")
+
+                winner, conf, reason = self.pairwise_tie_break(
+                    query_image, query_text, c1_path, c2_path, tensor_cache=tensor_cache
+                )
+
+                if winner == "B" and conf >= 0.60:
+                    reranked[0] = (c2_path, round(score_1 + 0.001, 4), verdict_2)
+                    reranked[1] = (c1_path, round(score_2, 4), verdict_1)
+                    print(f"  >>> Result: Winner is B ({os.path.basename(c2_path)}) over A (conf={conf:.2f}). Reason: {reason}")
+                else:
+                    print(f"  >>> Result: Confirmed A ({os.path.basename(c1_path)}) as Top-1 (conf={conf:.2f}). Reason: {reason}")
+
         return reranked[:top_k]
 
     def covr_critic_evaluate(
@@ -702,6 +873,7 @@ class ReAgentV:
         hybrid_alpha: float = 0.70,
         use_reasoning: bool = True,
         candidate_pool_size: int = 50,
+        enable_tournament: bool = True,
     ) -> List[Tuple[str, float, str]]:
         """
         Full Two-Stage Adaptive Retrieval Loop with Cascade Candidate Generation and Memory Bank.
@@ -710,10 +882,11 @@ class ReAgentV:
            from [query_image + query_text].
         1. Cascade Candidate Generation:
            - Fast Broad Pool: Scans entire corpus to fetch Top-M (candidate_pool_size=50) candidates in 0.005s.
+           - Dual-View Alignment: Balances composed query with target description text.
            - Fast Intent-Preserving Pre-rank: Isolates Top-N optimal candidates.
-        2. Agentic Reranker (LLaVA): Top-K ranked results with parallel prefetching.
+        2. Agentic Reranker (LLaVA): Top-K ranked results with RRF + Pairwise Tournament.
         3. Critic Agent: Evaluates Top-1 result (instant tensor cache reuse).
-        4. If score >= reward_threshold: Early stop (Confirmed High-Quality Hit).
+        4. If score >= reward_threshold or decisive margin: Early stop (Confirmed High-Quality Hit).
         5. Preserves the clean iteration 0 results to safeguard Recall@5 and Recall@10,
            only superseding if a retry iteration achieves a definitively superior score (>= reward_threshold).
         """
@@ -766,6 +939,8 @@ class ReAgentV:
             tools_used = ["CLIP_coarse"]
             if use_reasoning:
                 tools_used.append("LLaVA_reason")
+            if enable_tournament:
+                tools_used.append("Pairwise_Tournament")
             if force_det:
                 tools_used.append("DET")
             if force_ocr:
@@ -783,12 +958,13 @@ class ReAgentV:
                 candidate_pool_size=candidate_pool_size,
             )
 
-            # Stage 2: Agentic Reranker (with parallel prefetching + score cache)
+            # Stage 2: Agentic Reranker (with RRF + Pairwise Tournament + score cache)
             reranked = self.agentic_rerank(
                 query_image, query_text, coarse_results,
                 top_k=top_k, hybrid_alpha=hybrid_alpha,
                 score_cache=_score_cache,
                 tensor_cache=_tensor_cache,
+                enable_tournament=enable_tournament,
             )
 
             if not reranked:
@@ -822,6 +998,12 @@ class ReAgentV:
                 best_results = reranked
                 best_reward = scalar_reward
                 print(f"[ReAgentV] Improved results in iteration {iteration + 1} with reward {scalar_reward:.3f}")
+
+            # Margin-aware Early Exit: If Top-1 has high reward and decisive margin over Top-2, stop early
+            top_margin = (reranked[0][1] - reranked[1][1]) if len(reranked) >= 2 else 1.0
+            if (scalar_reward >= reward_threshold) or (scalar_reward >= 0.88 and top_margin >= 0.015):
+                print(f"[ReAgentV] Decisive Top-1 hit (reward={scalar_reward:.3f}, margin={top_margin:.4f}) — early stopping to preserve accuracy.")
+                break
 
             # Stagnation early exit: if retry iteration yields no improvement over baseline, stop early
             if iteration >= 1 and scalar_reward <= best_reward and scalar_reward < 0.50:

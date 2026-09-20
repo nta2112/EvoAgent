@@ -70,6 +70,8 @@ def main():
                         help="Initial Image/Text weight for CLIP query fusion")
     parser.add_argument("--disable_reasoning", action="store_true",
                         help="Disable Reason-then-Retrieve target scene simulation")
+    parser.add_argument("--disable_tournament", action="store_true",
+                        help="Disable VRAgent Pairwise Tournament Tie-Breaking for Top-2 candidates")
     args = parser.parse_args()
 
     # ------------------------------------------------------------------
@@ -138,6 +140,7 @@ def main():
         reward_threshold=args.reward_threshold,
         use_reasoning=not args.disable_reasoning,
         candidate_pool_size=args.candidate_pool_size,
+        enable_tournament=not args.disable_tournament,
     )
 
     # ------------------------------------------------------------------

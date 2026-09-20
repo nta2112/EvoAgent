@@ -138,3 +138,38 @@ Return ONLY the concise visual description of the target video scene without int
 Example: "a person riding a bicycle down an asphalt road during sunset with trees in the background"
 """
 
+
+# ---------------------------------------------------------------------------
+# Pairwise Tournament Tie-Breaking Prompt (VRAgent-inspired)
+# ---------------------------------------------------------------------------
+# Used to directly compare Top-1 and Top-2 candidate videos to resolve ties
+# between near-identical sister clips and determine the definitive winner.
+
+covr_pairwise_tournament_template = """
+[Task]
+You are a Video Retrieval Judge deciding between Candidate Video A and Candidate Video B for a Composed Video Retrieval query.
+
+[Visual Input Layout]
+- Frame 1: Reference Image (starting state).
+- Frames 2, 3: Candidate Video A keyframes.
+- Frames 4, 5: Candidate Video B keyframes.
+
+[Edit Instruction]
+{edit_prompt}
+
+[Goal]
+Judge which candidate video (Video A or Video B) better executes the Edit Instruction while maintaining consistent visual context from the Reference Image.
+
+[Decision Rules]
+- If Video A is more faithful, accurate, and specific to the requested edit, prefer "A".
+- If Video B is more faithful, accurate, and specific to the requested edit, prefer "B".
+
+[Output Format]
+Output ONLY a concise JSON object:
+{{
+  "preferred": "<A | B>",
+  "confidence": <float from 0.5 to 1.0>,
+  "reason": "<brief 1-sentence reason>"
+}}
+"""
+

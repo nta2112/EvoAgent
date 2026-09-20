@@ -78,6 +78,8 @@ def main():
                         help="Weight for CLIP similarity in hybrid scoring (default: 0.70)")
     parser.add_argument("--disable_reasoning", action="store_true",
                         help="Disable Reason-then-Retrieve target scene simulation")
+    parser.add_argument("--disable_tournament", action="store_true",
+                        help="Disable VRAgent Pairwise Tournament Tie-Breaking for Top-2 candidates")
     parser.add_argument("--output_path",     type=str,   default="eval_results.json")
     args = parser.parse_args()
 
@@ -180,6 +182,7 @@ def main():
                 hybrid_alpha=args.hybrid_alpha,
                 use_reasoning=not args.disable_reasoning,
                 candidate_pool_size=args.candidate_pool_size,
+                enable_tournament=not args.disable_tournament,
             )
             agent_paths = [os.path.normpath(r[0]) for r in agent_results]
             if gt_norm in agent_paths:
