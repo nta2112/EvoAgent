@@ -422,9 +422,10 @@ class ReAgentV:
             txt_feat = F.normalize(txt_feat.float(), dim=-1)
 
         # In Reason-then-Retrieve mode, reasoned text is already visually grounded.
-        # If alpha is high, we balance it so text plays a strong directing role.
+        # We set eff_alpha low (0.15) so the target description drives the search,
+        # preventing old entities in the reference image (e.g., cow) from contaminating target vectors (e.g., goat).
         if reasoned_description:
-            eff_alpha = min(alpha, 0.35)
+            eff_alpha = min(alpha, 0.15)
         else:
             eff_alpha = alpha
 
@@ -451,9 +452,9 @@ class ReAgentV:
         Stage 1 — Cascade Candidate Generation & Fast Pre-ranking:
         1. Fast Broad Pool: Retrieves Top-M (candidate_pool_size=50) candidates using
            the composed query vector (reasoned target state + visual features) across the full corpus.
-        2. Multi-view Vector Pre-ranking: Evaluates both semantic transition relevance and
-           visual continuity against the reference image to re-rank the pool in 0.001s.
-        3. Returns Top-N (top_n, typically 8-10) optimal candidates for deep LLaVA reranking.
+        2. Fast Intent-Preserving Pre-ranking: Focuses candidate filtering strictly on
+           the target transformation state without penalizing modified visual entities.
+        3. Returns Top-N optimal candidates for deep LLaVA reranking.
         """
         try:
             clip_device = next(self.clip_model.parameters()).device
@@ -474,37 +475,21 @@ class ReAgentV:
                 if vp in exclude_paths:
                     sims_composed[i] = -1.0
 
-        # Step 1: Broad Candidate Pool (Top-M, e.g. 50 videos)
+        # Step 1: Broad Candidate Pool (Top-M, e.g. 50-100 videos)
         pool_m = min(max(candidate_pool_size, top_n), len(corpus_paths))
         pool_indices = torch.topk(sims_composed, k=pool_m).indices
 
         # If pool size equals desired top_n, directly return
-        if pool_m <= top_n or not reasoned_description:
+        if pool_m <= top_n:
             results = [(corpus_paths[i], float(sims_composed[i])) for i in pool_indices.tolist()[:top_n]]
             return results
 
-        # Step 2: Lightweight Vector Pre-ranking within the Top-M pool
-        # Extract visual feature of reference image to preserve contextual consistency
-        with torch.no_grad():
-            img_inputs = self.clip_processor(
-                images=query_image, return_tensors="pt"
-            )["pixel_values"].to(clip_device, dtype=torch.float16)
-            img_feat = self.clip_model.get_image_features(img_inputs)
-            img_feat = F.normalize(img_feat.float(), dim=-1).cpu()  # [1, D]
-
-        # Sub-tensor for the candidates in the pool
-        pool_feats = corpus_embeddings[pool_indices]  # [M, D]
-        sims_vis = (pool_feats @ img_feat.T).squeeze(-1)  # [M]
-        sims_comp_sub = sims_composed[pool_indices]      # [M]
-
-        # Balanced pre-rank score: 75% Composed Target intent + 25% Visual continuity
-        # This filters out false-positive distractors that share no visual environment
-        prerank_scores = 0.75 * sims_comp_sub + 0.25 * sims_vis
-
-        top_sub_indices = torch.topk(prerank_scores, k=min(top_n, pool_m)).indices.tolist()
-        final_indices = [pool_indices[si].item() for si in top_sub_indices]
-
-        results = [(corpus_paths[idx], float(sims_composed[idx])) for idx in final_indices]
+        # Step 2: Intent-Focused Pre-ranking
+        # When reasoned_description is present, sims_composed is already highly target-aligned.
+        # We preserve the top candidates according to the target composed similarity,
+        # avoiding biasing back towards the unmodified reference image.
+        top_sub_indices = pool_indices[:top_n].tolist()
+        results = [(corpus_paths[idx], float(sims_composed[idx])) for idx in top_sub_indices]
         return results
 
     def _video_to_tensor(
@@ -712,7 +697,7 @@ class ReAgentV:
         top_k: int = 5,
         top_n_coarse: int = 10,
         max_iterations: int = 2,
-        reward_threshold: float = 0.85,
+        reward_threshold: float = 0.92,
         hybrid_alpha: float = 0.40,
         use_reasoning: bool = True,
         candidate_pool_size: int = 50,
@@ -724,7 +709,7 @@ class ReAgentV:
            from [query_image + query_text].
         1. Cascade Candidate Generation:
            - Fast Broad Pool: Scans entire corpus to fetch Top-M (candidate_pool_size=50) candidates in 0.005s.
-           - Multi-view Vector Pre-rank: Balances target intent & visual context to isolate Top-N (top_n_coarse=8..10).
+           - Fast Intent-Preserving Pre-rank: Isolates Top-N optimal candidates.
         2. Agentic Reranker (LLaVA): Top-K ranked results with parallel prefetching.
         3. Critic Agent: Evaluates Top-1 result (instant tensor cache reuse).
         4. If score >= reward_threshold: Early stop (Confirmed High-Quality Hit).

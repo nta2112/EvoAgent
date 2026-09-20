@@ -29,15 +29,18 @@ You are a Video Retrieval Judge evaluating if a Candidate Video satisfies a Comp
 [Goal]
 Judge whether the Candidate Video (Frames 2-5) preserves relevant scene context from the Reference Image (Frame 1) while successfully applying the Edit Instruction.
 
-[Scoring Criteria]
-- HIGH RELEVANCE (0.85 - 1.0): The Candidate Video clearly executes the edit instruction (shows the requested new object, action, or state change) with consistent context.
-- MEDIUM RELEVANCE (0.45 - 0.70): Partially related scene or related topic, but does not clearly show the specific requested edit.
-- LOW RELEVANCE (0.0 - 0.30): Completely unchanged, wrong action, or wrong entities.
+[Fine-grained Continuous Scoring Rules (0.00 to 1.00)]
+Evaluate the candidate with a continuous, precise float score:
+- 0.90 - 1.00: EXACT MATCH. The Candidate Video clearly executes the requested edit instruction (shows the new entity, action, or state change requested) while maintaining consistent environmental context. Give higher scores (0.95-1.00) if the edit is unmistakably prominent.
+- 0.70 - 0.89: STRONG CANDIDATE. The requested edit is visible, but minor details differ or context has slight variations.
+- 0.40 - 0.69: PARTIAL MATCH. Related general scene or topic, but the specific requested transformation is vague, ambiguous, or incomplete.
+- 0.10 - 0.39: WEAK / WRONG EDIT. Shows the wrong object/action or retains the entity that was instructed to be replaced/removed.
+- 0.00: COMPLETELY IRRELEVANT.
 
 [Output Format]
-Output ONLY a concise JSON object:
+Output ONLY a concise JSON object. Assign a nuanced decimal relevance_score (e.g. 0.94, 0.88, 0.76, 0.52):
 {{
-  "relevance_score": <float from 0.0 to 1.0 based on criteria above>,
+  "relevance_score": <float from 0.00 to 1.00 with 2 decimal places>,
   "verdict": "<MATCH | PARTIAL_MATCH | NO_MATCH>"
 }}
 """
@@ -63,15 +66,16 @@ You are a strict Critic Agent evaluating whether the retrieved Candidate Video c
 [Candidate Video]
 - Video ID: {candidate_id}
 
-[Scoring Rules]
-- EXACT MATCH (0.85 - 1.0): The Candidate Video accurately executes the edit instruction while preserving relevant visual context from the Reference Image.
-- PARTIAL / WRONG (0.10 - 0.50): Fails the edit, wrong object/action, or merely coincidental background.
-- IRRELEVANT (0.0): Completely unrelated scene and action.
+[Strict Scoring Rules (0.00 to 1.00)]
+- 0.92 - 1.00: PERFECT / DEFINITIVE MATCH. The Candidate Video unambiguously applies the edit instruction and preserves legitimate context.
+- 0.70 - 0.91: PLAUSIBLE BUT UNCERTAIN. Shows relevant objects or transformations, but lacks distinctive proof that it is the exact target intended.
+- 0.10 - 0.69: INCORRECT EDIT / DISTRACTOR. Wrong action, missing key target entity, or retains what should have been changed.
+- 0.00: COMPLETELY UNRELATED.
 
 [Output Format]
 Return ONLY a valid JSON object. Put scalar_reward on the FIRST line:
 {{
-  "scalar_reward": <float 0.0 to 1.0 based on the strict rules above>,
+  "scalar_reward": <precise float from 0.00 to 1.00 with 2 decimal places>,
   "verdict": "<MATCH | PARTIAL_MATCH | MISMATCH>",
   "diagnostic": "<brief diagnostic: visual_mismatch | action_mismatch | object_missing | text_mismatch | correct>",
   "structured_feedback": "<brief 1-sentence explanation>"
