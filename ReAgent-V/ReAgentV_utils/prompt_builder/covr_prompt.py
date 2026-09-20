@@ -29,18 +29,18 @@ You are a Video Retrieval Judge evaluating if a Candidate Video satisfies a Comp
 [Goal]
 Judge whether the Candidate Video (Frames 2-5) preserves relevant scene context from the Reference Image (Frame 1) while successfully applying the Edit Instruction.
 
-[Fine-grained Continuous Scoring Rules (0.00 to 1.00)]
-Evaluate the candidate with a continuous, precise float score:
-- 0.90 - 1.00: EXACT MATCH. The Candidate Video clearly executes the requested edit instruction (shows the new entity, action, or state change requested) while maintaining consistent environmental context. Give higher scores (0.95-1.00) if the edit is unmistakably prominent.
-- 0.70 - 0.89: STRONG CANDIDATE. The requested edit is visible, but minor details differ or context has slight variations.
-- 0.40 - 0.69: PARTIAL MATCH. Related general scene or topic, but the specific requested transformation is vague, ambiguous, or incomplete.
-- 0.10 - 0.39: WEAK / WRONG EDIT. Shows the wrong object/action or retains the entity that was instructed to be replaced/removed.
-- 0.00: COMPLETELY IRRELEVANT.
+[Scoring Principles (0.0 to 1.0)]
+Judge how well the Candidate Video fulfills the Edit Instruction:
+- 1.0: Clearly and unmistakably shows the requested modification (new entity, action, or state change) with context consistent with the reference image.
+- 0.7 - 0.9: The requested change is present, but subtle, brief, or has slight contextual variations.
+- 0.4 - 0.6: Partially related theme or environment, but does not clearly show the requested modification.
+- 0.1 - 0.3: Fails the edit instruction, shows wrong object/action, or retains the entity that was instructed to be changed/removed.
+- 0.0: Completely irrelevant or unrelated scene.
 
 [Output Format]
-Output ONLY a concise JSON object. Assign a nuanced decimal relevance_score (e.g. 0.94, 0.88, 0.76, 0.52):
+Output ONLY a concise JSON object:
 {{
-  "relevance_score": <float from 0.00 to 1.00 with 2 decimal places>,
+  "relevance_score": <float between 0.0 and 1.0>,
   "verdict": "<MATCH | PARTIAL_MATCH | NO_MATCH>"
 }}
 """
@@ -66,16 +66,16 @@ You are a strict Critic Agent evaluating whether the retrieved Candidate Video c
 [Candidate Video]
 - Video ID: {candidate_id}
 
-[Strict Scoring Rules (0.00 to 1.00)]
-- 0.92 - 1.00: PERFECT / DEFINITIVE MATCH. The Candidate Video unambiguously applies the edit instruction and preserves legitimate context.
-- 0.70 - 0.91: PLAUSIBLE BUT UNCERTAIN. Shows relevant objects or transformations, but lacks distinctive proof that it is the exact target intended.
-- 0.10 - 0.69: INCORRECT EDIT / DISTRACTOR. Wrong action, missing key target entity, or retains what should have been changed.
-- 0.00: COMPLETELY UNRELATED.
+[Scoring Criteria (0.0 to 1.0)]
+- 0.90 - 1.00: The Candidate Video clearly executes the edit instruction while preserving relevant visual context.
+- 0.60 - 0.85: Plausible but uncertain or partial execution of the edit.
+- 0.10 - 0.50: Incorrect edit, wrong action, missing requested entity, or retaining removed entity.
+- 0.00: Completely unrelated scene and action.
 
 [Output Format]
 Return ONLY a valid JSON object. Put scalar_reward on the FIRST line:
 {{
-  "scalar_reward": <precise float from 0.00 to 1.00 with 2 decimal places>,
+  "scalar_reward": <float between 0.0 and 1.0>,
   "verdict": "<MATCH | PARTIAL_MATCH | MISMATCH>",
   "diagnostic": "<brief diagnostic: visual_mismatch | action_mismatch | object_missing | text_mismatch | correct>",
   "structured_feedback": "<brief 1-sentence explanation>"

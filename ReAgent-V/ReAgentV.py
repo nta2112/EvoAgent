@@ -543,7 +543,7 @@ class ReAgentV:
         query_text: str,
         candidate_list: List[Tuple[str, float]],
         top_k: int = 5,
-        hybrid_alpha: float = 0.40,
+        hybrid_alpha: float = 0.70,
         score_cache: Optional[Dict[str, Tuple[float, str]]] = None,
         tensor_cache: Optional[Dict[str, List[torch.Tensor]]] = None,
     ) -> List[Tuple[str, float, str]]:
@@ -552,6 +552,7 @@ class ReAgentV:
 
         Combines CLIP visual similarity with LLaVA action/edit relevance:
             final_score = hybrid_alpha * clip_score + (1 - hybrid_alpha) * rel_score
+            (Default hybrid_alpha = 0.70: 70% CLIP visual foundation + 30% LLaVA verifier)
 
         Asynchronous Parallel Prefetching:
             Candidate videos needing LLaVA inference are pre-decoded in parallel across
@@ -698,7 +699,7 @@ class ReAgentV:
         top_n_coarse: int = 10,
         max_iterations: int = 2,
         reward_threshold: float = 0.92,
-        hybrid_alpha: float = 0.40,
+        hybrid_alpha: float = 0.70,
         use_reasoning: bool = True,
         candidate_pool_size: int = 50,
     ) -> List[Tuple[str, float, str]]:
