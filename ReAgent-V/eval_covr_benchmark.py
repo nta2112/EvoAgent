@@ -67,9 +67,12 @@ def main():
     parser.add_argument("--target_corpus_size", type=int, default=None,
                         help="Optional: shrink corpus size (e.g. 300, 500) while guaranteeing 100% ground-truth presence")
     parser.add_argument("--top_k",           type=int,   default=10)
-    parser.add_argument("--top_n_coarse",    type=int,   default=12)
-    parser.add_argument("--max_iterations",  type=int,   default=2)
-    parser.add_argument("--reward_threshold",type=float, default=0.85)
+    parser.add_argument("--candidate_pool_size", type=int, default=50,
+                        help="Size of initial broad candidate pool before lightweight pre-ranking (default: 50)")
+    parser.add_argument("--top_n_coarse",    type=int,   default=8,
+                        help="Number of pre-ranked candidates sent to deep LLaVA reranking (default: 8)")
+    parser.add_argument("--max_iterations",  type=int,   default=1)
+    parser.add_argument("--reward_threshold",type=float, default=0.75)
     parser.add_argument("--alpha",           type=float, default=0.50)
     parser.add_argument("--hybrid_alpha",    type=float, default=0.40,
                         help="Weight for CLIP similarity in hybrid scoring (default: 0.40)")
@@ -146,54 +149,55 @@ def main():
                 agent_ranks.append(None)
                 continue
 
-        gt_norm = os.path.normpath(gt_video_path)
-        gt_base = os.path.basename(gt_norm)
+            gt_norm = os.path.normpath(gt_video_path)
+            gt_base = os.path.basename(gt_norm)
 
-        # ---- CLIP-only Coarse retrieval (Stage 1 only, no agent) ----
-        clip_results = qa_system.coarse_search(
-            query_image, query_text,
-            corpus_embeddings, corpus_paths,
-            top_n=args.top_k,
-            alpha=args.alpha,
-        )
-        clip_paths = [os.path.normpath(r[0]) for r in clip_results]
-        if gt_norm in clip_paths:
-            clip_rank = clip_paths.index(gt_norm) + 1
-        else:
-            clip_bases = [os.path.basename(p) for p in clip_paths]
-            clip_rank = (clip_bases.index(gt_base) + 1) if gt_base in clip_bases else None
-        clip_ranks.append(clip_rank)
+            # ---- CLIP-only Coarse retrieval (Stage 1 only, no agent) ----
+            clip_results = qa_system.coarse_search(
+                query_image, query_text,
+                corpus_embeddings, corpus_paths,
+                top_n=args.top_k,
+                alpha=args.alpha,
+            )
+            clip_paths = [os.path.normpath(r[0]) for r in clip_results]
+            if gt_norm in clip_paths:
+                clip_rank = clip_paths.index(gt_norm) + 1
+            else:
+                clip_bases = [os.path.basename(p) for p in clip_paths]
+                clip_rank = (clip_bases.index(gt_base) + 1) if gt_base in clip_bases else None
+            clip_ranks.append(clip_rank)
 
-        # ---- Full Agent Retrieval (Stage 1 + Stage 2 + Adaptive Loop) ----
-        agent_results = qa_system.adaptive_covr_retrieval(
-            query_image=query_image,
-            query_text=query_text,
-            corpus_embeddings=corpus_embeddings,
-            corpus_paths=corpus_paths,
-            top_k=args.top_k,
-            top_n_coarse=args.top_n_coarse,
-            max_iterations=args.max_iterations,
-            reward_threshold=args.reward_threshold,
-            hybrid_alpha=args.hybrid_alpha,
-            use_reasoning=not args.disable_reasoning,
-        )
-        agent_paths = [os.path.normpath(r[0]) for r in agent_results]
-        if gt_norm in agent_paths:
-            agent_rank = agent_paths.index(gt_norm) + 1
-        else:
-            agent_bases = [os.path.basename(p) for p in agent_paths]
-            agent_rank = (agent_bases.index(gt_base) + 1) if gt_base in agent_bases else None
-        agent_ranks.append(agent_rank)
+            # ---- Full Agent Retrieval (Stage 1 + Stage 2 + Adaptive Loop) ----
+            agent_results = qa_system.adaptive_covr_retrieval(
+                query_image=query_image,
+                query_text=query_text,
+                corpus_embeddings=corpus_embeddings,
+                corpus_paths=corpus_paths,
+                top_k=args.top_k,
+                top_n_coarse=args.top_n_coarse,
+                max_iterations=args.max_iterations,
+                reward_threshold=args.reward_threshold,
+                hybrid_alpha=args.hybrid_alpha,
+                use_reasoning=not args.disable_reasoning,
+                candidate_pool_size=args.candidate_pool_size,
+            )
+            agent_paths = [os.path.normpath(r[0]) for r in agent_results]
+            if gt_norm in agent_paths:
+                agent_rank = agent_paths.index(gt_norm) + 1
+            else:
+                agent_bases = [os.path.basename(p) for p in agent_paths]
+                agent_rank = (agent_bases.index(gt_base) + 1) if gt_base in agent_bases else None
+            agent_ranks.append(agent_rank)
 
-        per_query_results.append({
-            "query_idx":     int(i),
-            "edit_prompt":   query_text,
-            "gt_video":      os.path.basename(gt_video_path),
-            "clip_rank":     clip_rank,
-            "agent_rank":    agent_rank,
-            "clip_top1":     os.path.basename(clip_paths[0]) if clip_paths else None,
-            "agent_top1":    os.path.basename(agent_paths[0]) if agent_paths else None,
-        })
+            per_query_results.append({
+                "query_idx":     int(i),
+                "edit_prompt":   query_text,
+                "gt_video":      os.path.basename(gt_video_path),
+                "clip_rank":     clip_rank,
+                "agent_rank":    agent_rank,
+                "clip_top1":     os.path.basename(clip_paths[0]) if clip_paths else None,
+                "agent_top1":    os.path.basename(agent_paths[0]) if agent_paths else None,
+            })
 
     elapsed = time.time() - start_time
 

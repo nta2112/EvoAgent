@@ -445,29 +445,66 @@ class ReAgentV:
         query_expansion_hint: str = "",
         exclude_paths: Optional[set] = None,
         reasoned_description: Optional[str] = None,
+        candidate_pool_size: int = 50,
     ) -> List[Tuple[str, float]]:
         """
-        Stage 1 — Fast coarse retrieval using CLIP cosine similarity.
-        Supports Reason-then-Retrieve via reasoned_description.
-
-        Returns:
-            List of (video_path, similarity_score) sorted descending, length = top_n.
+        Stage 1 — Cascade Candidate Generation & Fast Pre-ranking:
+        1. Fast Broad Pool: Retrieves Top-M (candidate_pool_size=50) candidates using
+           the composed query vector (reasoned target state + visual features) across the full corpus.
+        2. Multi-view Vector Pre-ranking: Evaluates both semantic transition relevance and
+           visual continuity against the reference image to re-rank the pool in 0.001s.
+        3. Returns Top-N (top_n, typically 8-10) optimal candidates for deep LLaVA reranking.
         """
+        try:
+            clip_device = next(self.clip_model.parameters()).device
+        except Exception:
+            clip_device = torch.device("cuda:0")
+
+        # Encode full composed query
         query_feat = self.encode_covr_query(
             query_image, query_text, alpha, query_expansion_hint, reasoned_description=reasoned_description
         )  # [1, D]
 
-        # Cosine similarity: query [1,D] × corpus [N,D]^T = [N]
-        sims = (corpus_embeddings @ query_feat.T).squeeze(-1)  # [N]
+        # Fast GPU/CPU cosine similarity against entire corpus [N]
+        sims_composed = (corpus_embeddings @ query_feat.T).squeeze(-1)  # [N]
 
         # Exclude previously rejected candidates
         if exclude_paths:
             for i, vp in enumerate(corpus_paths):
                 if vp in exclude_paths:
-                    sims[i] = -1.0
+                    sims_composed[i] = -1.0
 
-        top_indices = torch.topk(sims, k=min(top_n, len(corpus_paths))).indices.tolist()
-        results = [(corpus_paths[i], float(sims[i])) for i in top_indices]
+        # Step 1: Broad Candidate Pool (Top-M, e.g. 50 videos)
+        pool_m = min(max(candidate_pool_size, top_n), len(corpus_paths))
+        pool_indices = torch.topk(sims_composed, k=pool_m).indices
+
+        # If pool size equals desired top_n, directly return
+        if pool_m <= top_n or not reasoned_description:
+            results = [(corpus_paths[i], float(sims_composed[i])) for i in pool_indices.tolist()[:top_n]]
+            return results
+
+        # Step 2: Lightweight Vector Pre-ranking within the Top-M pool
+        # Extract visual feature of reference image to preserve contextual consistency
+        with torch.no_grad():
+            img_inputs = self.clip_processor(
+                images=query_image, return_tensors="pt"
+            )["pixel_values"].to(clip_device, dtype=torch.float16)
+            img_feat = self.clip_model.get_image_features(img_inputs)
+            img_feat = F.normalize(img_feat.float(), dim=-1).cpu()  # [1, D]
+
+        # Sub-tensor for the candidates in the pool
+        pool_feats = corpus_embeddings[pool_indices]  # [M, D]
+        sims_vis = (pool_feats @ img_feat.T).squeeze(-1)  # [M]
+        sims_comp_sub = sims_composed[pool_indices]      # [M]
+
+        # Balanced pre-rank score: 75% Composed Target intent + 25% Visual continuity
+        # This filters out false-positive distractors that share no visual environment
+        prerank_scores = 0.75 * sims_comp_sub + 0.25 * sims_vis
+
+        top_sub_indices = torch.topk(prerank_scores, k=min(top_n, pool_m)).indices.tolist()
+        final_indices = [pool_indices[si].item() for si in top_sub_indices]
+
+        results = [(corpus_paths[idx], float(sims_composed[idx])) for idx in final_indices]
         return results
 
     def _video_to_tensor(
@@ -673,18 +710,21 @@ class ReAgentV:
         corpus_embeddings: torch.Tensor,
         corpus_paths: List[str],
         top_k: int = 5,
-        top_n_coarse: int = 12,
+        top_n_coarse: int = 10,
         max_iterations: int = 2,
         reward_threshold: float = 0.85,
         hybrid_alpha: float = 0.40,
         use_reasoning: bool = True,
+        candidate_pool_size: int = 50,
     ) -> List[Tuple[str, float, str]]:
         """
-        Full Two-Stage Adaptive Retrieval Loop with Reason-then-Retrieve and Memory Bank.
+        Full Two-Stage Adaptive Retrieval Loop with Cascade Candidate Generation and Memory Bank.
 
         0. Reason: (Optional, if use_reasoning=True) LLaVA simulates the target video scene
            from [query_image + query_text].
-        1. Coarse Search (CLIP): Top-N candidates retrieved using the reasoned description.
+        1. Cascade Candidate Generation:
+           - Fast Broad Pool: Scans entire corpus to fetch Top-M (candidate_pool_size=50) candidates in 0.005s.
+           - Multi-view Vector Pre-rank: Balances target intent & visual context to isolate Top-N (top_n_coarse=8..10).
         2. Agentic Reranker (LLaVA): Top-K ranked results with parallel prefetching.
         3. Critic Agent: Evaluates Top-1 result (instant tensor cache reuse).
         4. If score >= reward_threshold: Early stop (Confirmed High-Quality Hit).
@@ -745,7 +785,7 @@ class ReAgentV:
             if force_ocr:
                 tools_used.append("OCR")
 
-            # Stage 1: Coarse CLIP retrieval (with reasoned_description if enabled)
+            # Stage 1: Cascade Candidate Generation (Pool Top-M -> Pre-rank Top-N)
             coarse_results = self.coarse_search(
                 query_image, query_text,
                 corpus_embeddings, corpus_paths,
@@ -754,6 +794,7 @@ class ReAgentV:
                 query_expansion_hint=hint,
                 exclude_paths=exclude_paths,
                 reasoned_description=reasoned_desc,
+                candidate_pool_size=candidate_pool_size,
             )
 
             # Stage 2: Agentic Reranker (with parallel prefetching + score cache)

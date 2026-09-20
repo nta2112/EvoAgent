@@ -60,9 +60,12 @@ def main():
     parser.add_argument("--prompt",        type=str, default=None,
                         help="Optional: custom edit prompt (required with --image_path)")
     parser.add_argument("--top_k",         type=int, default=5)
-    parser.add_argument("--top_n_coarse",  type=int, default=20)
-    parser.add_argument("--max_iterations",type=int, default=3)
-    parser.add_argument("--reward_threshold", type=float, default=0.85)
+    parser.add_argument("--candidate_pool_size", type=int, default=50,
+                        help="Size of initial broad candidate pool before lightweight pre-ranking (default: 50)")
+    parser.add_argument("--top_n_coarse",  type=int, default=8,
+                        help="Number of candidates sent to deep LLaVA reranking (default: 8)")
+    parser.add_argument("--max_iterations",type=int, default=1)
+    parser.add_argument("--reward_threshold", type=float, default=0.75)
     parser.add_argument("--alpha",         type=float, default=0.50,
                         help="Initial Image/Text weight for CLIP query fusion")
     parser.add_argument("--disable_reasoning", action="store_true",
@@ -134,6 +137,7 @@ def main():
         max_iterations=args.max_iterations,
         reward_threshold=args.reward_threshold,
         use_reasoning=not args.disable_reasoning,
+        candidate_pool_size=args.candidate_pool_size,
     )
 
     # ------------------------------------------------------------------
