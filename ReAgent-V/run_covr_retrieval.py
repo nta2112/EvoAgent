@@ -65,6 +65,8 @@ def main():
     parser.add_argument("--reward_threshold", type=float, default=0.85)
     parser.add_argument("--alpha",         type=float, default=0.50,
                         help="Initial Image/Text weight for CLIP query fusion")
+    parser.add_argument("--disable_reasoning", action="store_true",
+                        help="Disable Reason-then-Retrieve target scene simulation")
     args = parser.parse_args()
 
     # ------------------------------------------------------------------
@@ -131,6 +133,7 @@ def main():
         top_n_coarse=args.top_n_coarse,
         max_iterations=args.max_iterations,
         reward_threshold=args.reward_threshold,
+        use_reasoning=not args.disable_reasoning,
     )
 
     # ------------------------------------------------------------------

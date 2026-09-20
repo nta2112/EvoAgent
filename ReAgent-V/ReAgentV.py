@@ -29,6 +29,7 @@ from ReAgentV_utils.prompt_builder.covr_prompt import (
     covr_rerank_prompt_template,
     covr_critic_prompt_template,
     covr_query_expansion_template,
+    covr_reason_target_prompt_template,
 )
 from ReAgentV_utils.frame_selection_ecrs.ECRS_frame_selection import select_keyframes
 from ReAgentV_utils.video_processor.process_video import load_video_frames
@@ -300,21 +301,83 @@ class ReAgentV:
         print(f"[ReAgentV] Corpus index loaded: {len(video_paths):,} videos.")
         return embeddings, video_paths
 
+    def simulate_target_description(
+        self,
+        query_image: Image.Image,
+        query_text: str,
+    ) -> str:
+        """
+        Reason-then-Retrieve Stage 0:
+        Prompt LLaVA-Video with the reference image and edit instruction to imagine
+        and describe the resulting TARGET VIDEO.
+
+        Returns:
+            A concise visual description (str) of the expected target video.
+        """
+        try:
+            dev = next(
+                p.device for p in self.model.parameters()
+                if not p.is_meta and p.device.type == "cuda"
+            )
+        except StopIteration:
+            dev = torch.device("cuda:0")
+
+        # Encode single reference image frame as visual input for LLaVA
+        q_img_tensor = (
+            self.image_processor.preprocess([query_image], return_tensors="pt")["pixel_values"]
+            .to(dev, dtype=torch.float16)
+        )  # [1, C, H, W]
+        # LLaVA video modality expects list of frame tensors
+        vision_input = [q_img_tensor]
+
+        prompt = covr_reason_target_prompt_template.format(edit_prompt=query_text)
+        try:
+            raw_output = llava_inference(prompt, vision_input, max_new_tokens=48)
+            cleaned = _strip_llava_output(raw_output)
+            # Remove any unwanted quotes or line breaks
+            cleaned = cleaned.replace("\n", " ").replace('"', '').strip()
+            # If the output starts with descriptive prefixes, clean them
+            lower_clean = cleaned.lower()
+            prefixes_to_strip = [
+                "the target video shows",
+                "the target video depicts",
+                "the target video is",
+                "target video:",
+                "description:",
+            ]
+            for prefix in prefixes_to_strip:
+                if lower_clean.startswith(prefix):
+                    cleaned = cleaned[len(prefix):].strip(" :,-")
+                    break
+
+            if cleaned:
+                print(f"[ReAgentV Reason] Target simulation: '{cleaned}'")
+                return cleaned
+        except Exception as e:
+            print(f"[ReAgentV Reason] simulate_target_description failed: {e}")
+
+        # Fallback to query_text
+        return query_text
+
     def encode_covr_query(
         self,
         query_image: Image.Image,
         query_text: str,
         alpha: float = 0.5,
         query_expansion_hint: str = "",
+        reasoned_description: Optional[str] = None,
     ) -> torch.Tensor:
         """
-        Encode a composed query (Image + Text) into a single CLIP embedding.
+        Encode a composed query into a CLIP embedding.
+        If reasoned_description is provided (Reason-then-Retrieve mode), the text
+        features will focus heavily on the target scene description.
 
         Args:
             query_image           : PIL Image (middle frame of reference video).
             query_text            : Edit instruction / prompt text.
             alpha                 : Weight for image feature (1-alpha goes to text).
             query_expansion_hint  : Optional extra keywords appended to query_text.
+            reasoned_description : Optional pre-simulated target video description from LLaVA.
 
         Returns:
             query_feat : Tensor [1, D] L2-normalised composed query embedding.
@@ -324,12 +387,17 @@ class ReAgentV:
         except Exception:
             clip_device = torch.device("cuda:0")
 
-        # Format text with context prefix to align with target video representations
-        clean_text = query_text.strip()
-        if not clean_text.lower().startswith("a video of") and not clean_text.lower().startswith("a video showing"):
-            base_text = f"a video showing {clean_text}"
+        # Select text to encode: prioritized reasoned_description if available
+        if reasoned_description:
+            active_text = reasoned_description.strip()
         else:
-            base_text = clean_text
+            active_text = query_text.strip()
+
+        # Format text with context prefix to align with target video representations
+        if not active_text.lower().startswith("a video of") and not active_text.lower().startswith("a video showing"):
+            base_text = f"a video showing {active_text}"
+        else:
+            base_text = active_text
 
         if query_expansion_hint:
             full_text = f"{base_text}, {query_expansion_hint.strip()}"
@@ -353,9 +421,16 @@ class ReAgentV:
             txt_feat = self.clip_model.get_text_features(**txt_inputs)   # [1, D]
             txt_feat = F.normalize(txt_feat.float(), dim=-1)
 
+        # In Reason-then-Retrieve mode, reasoned text is already visually grounded.
+        # If alpha is high, we balance it so text plays a strong directing role.
+        if reasoned_description:
+            eff_alpha = min(alpha, 0.35)
+        else:
+            eff_alpha = alpha
+
         # Compose and re-normalise
         query_feat = F.normalize(
-            alpha * img_feat + (1.0 - alpha) * txt_feat, dim=-1
+            eff_alpha * img_feat + (1.0 - eff_alpha) * txt_feat, dim=-1
         )  # [1, D]
         return query_feat.cpu()
 
@@ -369,15 +444,17 @@ class ReAgentV:
         alpha: float = 0.5,
         query_expansion_hint: str = "",
         exclude_paths: Optional[set] = None,
+        reasoned_description: Optional[str] = None,
     ) -> List[Tuple[str, float]]:
         """
         Stage 1 — Fast coarse retrieval using CLIP cosine similarity.
+        Supports Reason-then-Retrieve via reasoned_description.
 
         Returns:
             List of (video_path, similarity_score) sorted descending, length = top_n.
         """
         query_feat = self.encode_covr_query(
-            query_image, query_text, alpha, query_expansion_hint
+            query_image, query_text, alpha, query_expansion_hint, reasoned_description=reasoned_description
         )  # [1, D]
 
         # Cosine similarity: query [1,D] × corpus [N,D]^T = [N]
@@ -600,17 +677,19 @@ class ReAgentV:
         max_iterations: int = 2,
         reward_threshold: float = 0.85,
         hybrid_alpha: float = 0.40,
+        use_reasoning: bool = True,
     ) -> List[Tuple[str, float, str]]:
         """
-        Full Two-Stage Adaptive Retrieval Loop with Memory Bank.
+        Full Two-Stage Adaptive Retrieval Loop with Reason-then-Retrieve and Memory Bank.
 
-        1. Coarse Search (CLIP) → Top-N candidates
-        2. Agentic Reranker (LLaVA) → Top-K ranked results with parallel prefetching
-        3. Critic Agent evaluates Top-1 result (instant tensor cache reuse)
+        0. Reason: (Optional, if use_reasoning=True) LLaVA simulates the target video scene
+           from [query_image + query_text].
+        1. Coarse Search (CLIP): Top-N candidates retrieved using the reasoned description.
+        2. Agentic Reranker (LLaVA): Top-K ranked results with parallel prefetching.
+        3. Critic Agent: Evaluates Top-1 result (instant tensor cache reuse).
         4. If score >= reward_threshold: Early stop (Confirmed High-Quality Hit).
-        5. Preserves the clean iteration 0 results (which rely on ground-truth edit prompt)
-           to safeguard Recall@5 and Recall@10, only superseding if a retry iteration
-           achieves a definitively superior score (>= reward_threshold).
+        5. Preserves the clean iteration 0 results to safeguard Recall@5 and Recall@10,
+           only superseding if a retry iteration achieves a definitively superior score (>= reward_threshold).
         """
         # Per-query score and tensor caches:
         _score_cache: Dict[str, Tuple[float, str]] = {}
@@ -620,6 +699,12 @@ class ReAgentV:
             reward_threshold=reward_threshold,
             initial_alpha=0.5,
         )
+
+        # Stage 0: Reason-then-Retrieve visual simulation
+        reasoned_desc = None
+        if use_reasoning:
+            print("\n[ReAgentV] --- Reason-then-Retrieve: Simulating Target Video State ---")
+            reasoned_desc = self.simulate_target_description(query_image, query_text)
 
         best_results = []
         best_reward = -1.0
@@ -653,12 +738,14 @@ class ReAgentV:
                     print(f"[ReAgentV] Query expansion fallback: {e}")
 
             tools_used = ["CLIP_coarse"]
+            if use_reasoning:
+                tools_used.append("LLaVA_reason")
             if force_det:
                 tools_used.append("DET")
             if force_ocr:
                 tools_used.append("OCR")
 
-            # Stage 1: Coarse CLIP retrieval
+            # Stage 1: Coarse CLIP retrieval (with reasoned_description if enabled)
             coarse_results = self.coarse_search(
                 query_image, query_text,
                 corpus_embeddings, corpus_paths,
@@ -666,6 +753,7 @@ class ReAgentV:
                 alpha=alpha,
                 query_expansion_hint=hint,
                 exclude_paths=exclude_paths,
+                reasoned_description=reasoned_desc,
             )
 
             # Stage 2: Agentic Reranker (with parallel prefetching + score cache)

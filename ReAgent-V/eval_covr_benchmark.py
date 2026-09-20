@@ -67,6 +67,8 @@ def main():
     parser.add_argument("--alpha",           type=float, default=0.50)
     parser.add_argument("--hybrid_alpha",    type=float, default=0.40,
                         help="Weight for CLIP similarity in hybrid scoring (default: 0.40)")
+    parser.add_argument("--disable_reasoning", action="store_true",
+                        help="Disable Reason-then-Retrieve target scene simulation")
     parser.add_argument("--output_path",     type=str,   default="eval_results.json")
     args = parser.parse_args()
 
@@ -155,6 +157,7 @@ def main():
             max_iterations=args.max_iterations,
             reward_threshold=args.reward_threshold,
             hybrid_alpha=args.hybrid_alpha,
+            use_reasoning=not args.disable_reasoning,
         )
         agent_paths = [os.path.normpath(r[0]) for r in agent_results]
         if gt_norm in agent_paths:

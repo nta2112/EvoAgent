@@ -102,3 +102,35 @@ Given an Edit Instruction that describes how to transform a reference image into
 Return ONLY a single descriptive query string for the TARGET video, maximum 20 words.
 Example: "replace cow with goat" → "a goat standing in a green pasture, livestock grazing on farm, animal"
 """
+
+
+# ---------------------------------------------------------------------------
+# CoVR Reason-then-Retrieve Target Video Simulation Prompt
+# ---------------------------------------------------------------------------
+# Used before coarse search to have LLaVA reason about the target visual state
+# by looking at the reference image and applying the edit instruction.
+
+covr_reason_target_prompt_template = """
+[Task]
+You are an expert Visual Reasoning Engine for Composed Video Retrieval.
+You are given a Reference Image (showing the starting scene/context) and an Edit Instruction describing the change to find the Target Video.
+
+[Visual Input]
+- The image provided is the Reference Image (initial state).
+
+[Edit Instruction]
+{edit_prompt}
+
+[Goal]
+Predict and describe what the resulting TARGET VIDEO looks like after applying the Edit Instruction.
+Follow these rules strictly:
+1. Synthesize the context from the Reference Image with the changes in the Edit Instruction.
+2. Focus on the resulting visual state: subject, action, visual appearance, and surrounding environment.
+3. Crucial: Do NOT include things that were removed, replaced, or absent after the change.
+4. Keep it concise, descriptive, and focused on visual elements (1 to 2 short sentences, under 30 words).
+
+[Output Format]
+Return ONLY the concise visual description of the target video scene without introductory phrases:
+Example: "a person riding a bicycle down an asphalt road during sunset with trees in the background"
+"""
+
