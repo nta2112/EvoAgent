@@ -949,7 +949,7 @@ class ReAgentV:
         max_iterations: int = 2,
         reward_threshold: float = 0.92,
         hybrid_alpha: float = 0.70,
-        use_reasoning: bool = True,
+        use_reasoning: bool = False,
         candidate_pool_size: int = 50,
         enable_tournament: bool = True,
     ) -> List[Tuple[str, float, str]]:
