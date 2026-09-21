@@ -654,15 +654,27 @@ class ReAgentV:
             confidence = (conf_1 + conf_2) / 2.0
             reason = f"Consistent preference for A across both orientations ({reason_1})"
         else:
-            # Order inconsistency (position bias detected) -> resolve by highest confidence
-            if conf_2 > conf_1 and pref_2 == "B":
+            # Order inconsistency (position bias detected where model tended to pick first option)
+            # Inspect the reasons for explicit preference of B over A:
+            b_favored_in_reason = any(
+                phrase in (reason_1 + " " + reason_2).lower()
+                for phrase in [
+                    "video b shows", "video b more", "video b better", "video b accurately",
+                    "prefer b", "prefers b", "choosing b", "candidate b"
+                ]
+            )
+            if pref_2 == "B" and (conf_2 > conf_1 or b_favored_in_reason):
                 preferred = "B"
-                confidence = conf_2
-                reason = f"Resolved position conflict in favor of B (conf={conf_2:.2f}): {reason_2}"
+                confidence = max(conf_1, conf_2)
+                reason = f"Inverted orientation confirmed B with decisive evidence: {reason_2}"
+            elif pref_1 == "B" and (conf_1 > conf_2 or b_favored_in_reason):
+                preferred = "B"
+                confidence = max(conf_1, conf_2)
+                reason = f"Forward orientation confirmed B with decisive evidence: {reason_1}"
             else:
                 preferred = "A"
-                confidence = conf_1
-                reason = f"Resolved position conflict in favor of A (conf={conf_1:.2f}): {reason_1}"
+                confidence = max(conf_1, conf_2)
+                reason = f"Maintained A under ambiguous tie: {reason_1}"
 
         return preferred, confidence, reason
 
@@ -802,12 +814,22 @@ class ReAgentV:
         # ── Pointwise Linear Hybrid Scoring ──
         # Combines CLIP similarity and LLaVA fine-grained relevance
         reranked = []
+        clip_top1_path = clip_sorted[0]["path"] if clip_sorted else None
+        clip_top1_score = clip_sorted[0]["clip_score"] if clip_sorted else 0.0
+        clip_top2_score = clip_sorted[1]["clip_score"] if len(clip_sorted) > 1 else 0.0
+        clip_top1_margin = clip_top1_score - clip_top2_score
+
         for item in evaluated_candidates:
             path = item["path"]
             effective_rel = min(item["rel_score"] * 0.3, 0.2) if item["verdict"] == "NO_MATCH" else item["rel_score"]
             linear_hybrid = hybrid_alpha * item["clip_score"] + (1.0 - hybrid_alpha) * effective_rel
             if item["verdict"] == "NO_MATCH":
                 linear_hybrid *= 0.3
+
+            # Safeguard decisive CLIP Rank 1: if CLIP was strongly confident (margin >= 0.012)
+            # and LLaVA verified it as a valid match (rel >= 0.70), protect its top rank
+            if path == clip_top1_path and clip_top1_margin >= 0.012 and item["verdict"] != "NO_MATCH" and item["rel_score"] >= 0.70:
+                linear_hybrid += 0.02
 
             reranked.append((path, round(linear_hybrid, 4), item["verdict"]))
 
@@ -1036,6 +1058,12 @@ class ReAgentV:
             # Early stopping strictly when true reward_threshold is met
             if scalar_reward >= reward_threshold:
                 print(f"[ReAgentV] High confidence hit (reward={scalar_reward:.3f} >= threshold={reward_threshold}) — stopping early.")
+                break
+
+            # Identical ranking early exit: if retry iteration yields the exact same Top-3 candidates,
+            # further iterations will just produce duplicate cache hits without improving accuracy
+            if iteration >= 1 and candidate_paths[:3] == memory.history[iteration - 1].top_candidates[:3]:
+                print(f"[ReAgentV] Converged on stable Top candidates — stopping early.")
                 break
 
             # Stagnation early exit: if retry iteration yields no improvement over baseline, stop early
