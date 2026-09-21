@@ -29,13 +29,13 @@ You are a Video Retrieval Judge evaluating if a Candidate Video satisfies a Comp
 [Goal]
 Judge whether the Candidate Video (Frames 2-5) preserves relevant scene context from the Reference Image (Frame 1) while successfully applying the Edit Instruction.
 
-[Scoring Principles (0.0 to 1.0)]
+[Scoring Principles (0.00 to 1.00)]
 Judge how well the Candidate Video fulfills the Edit Instruction:
-- 1.0: Clearly and unmistakably shows the requested modification (new entity, action, or state change) with context consistent with the reference image.
-- 0.7 - 0.9: The requested change is present, but subtle, brief, or has slight contextual variations.
-- 0.4 - 0.6: Partially related theme or environment, but does not clearly show the requested modification.
-- 0.1 - 0.3: Fails the edit instruction, shows wrong object/action, or retains the entity that was instructed to be changed/removed.
-- 0.0: Completely irrelevant or unrelated scene.
+- 0.90 - 1.00: Clearly and unmistakably shows the requested modification (new entity, action, color change, or state change). If the edit asks to change or replace something, the video showing the new state is correct.
+- 0.70 - 0.89: The requested change is present, but subtle or brief.
+- 0.40 - 0.69: Partially related theme or environment, but does not clearly show the requested modification.
+- 0.10 - 0.39: Fails the edit instruction, shows wrong object/action, or retains the entity that was instructed to be changed/removed.
+- 0.00: Completely irrelevant or unrelated scene.
 
 [Output Format]
 Output ONLY a concise JSON object:
@@ -147,29 +147,31 @@ Example: "a person riding a bicycle down an asphalt road during sunset with tree
 
 covr_pairwise_tournament_template = """
 [Task]
-You are a Video Retrieval Judge deciding between Candidate Video A and Candidate Video B for a Composed Video Retrieval query.
+You are a Composed Video Retrieval Judge choosing between Video A and Video B.
+The user wants to find the target video that results from applying an Edit Instruction to a Reference Image.
 
-[Visual Input Layout]
-- Frame 1: Reference Image (starting state).
-- Frames 2, 3: Candidate Video A keyframes.
-- Frames 4, 5: Candidate Video B keyframes.
+[Visual Inputs]
+- Frame 1: Reference Image (initial state).
+- Frames 2, 3: Candidate Video A.
+- Frames 4, 5: Candidate Video B.
 
 [Edit Instruction]
 {edit_prompt}
 
-[Goal]
-Judge which candidate video (Video A or Video B) better executes the Edit Instruction while maintaining consistent visual context from the Reference Image.
-
-[Decision Rules]
-- If Video A is more faithful, accurate, and specific to the requested edit, prefer "A".
-- If Video B is more faithful, accurate, and specific to the requested edit, prefer "B".
+[Evaluation Rules]
+1. TRANSFORMATION IS PARAMOUNT: The primary goal is that the Candidate Video MUST clearly execute the Edit Instruction (the requested new object, action, or state change).
+2. DO NOT PENALIZE INTENDED CHANGES: If the Edit Instruction asks to change or replace something (e.g. "make the billboard blank", "replace cow with goat", "change ribbon color", "make the tree lit", "in yellow"), the candidate video that shows the new state is CORRECT, even if its appearance, color, or text differs from the reference image.
+3. Compare Video A and Video B objectively:
+   - Does Video A or Video B show the requested modification more clearly, completely, and prominently?
+   - If Video B executes the edit better or more cleanly, choose "B".
+   - If Video A executes the edit better or more cleanly, choose "A".
 
 [Output Format]
 Output ONLY a concise JSON object:
 {{
   "preferred": "<A | B>",
   "confidence": <float from 0.5 to 1.0>,
-  "reason": "<brief 1-sentence reason>"
+  "reason": "<brief 1-sentence explanation comparing how A and B execute the edit>"
 }}
 """
 

@@ -597,29 +597,72 @@ class ReAgentV:
         frames_a = vid_a_tensor[0][:2] if vid_a_tensor[0].shape[0] >= 2 else vid_a_tensor[0]
         frames_b = vid_b_tensor[0][:2] if vid_b_tensor[0].shape[0] >= 2 else vid_b_tensor[0]
 
-        combined_tensor = torch.cat([q_img_tensor, frames_a, frames_b], dim=0)
-        combined_input = [combined_tensor]
-
+        # --- Symmetric Debiased Tournament (Evaluate A-vs-B and B-vs-A to eliminate position bias) ---
         prompt = covr_pairwise_tournament_template.format(edit_prompt=query_text)
-        try:
-            raw_output = llava_inference(prompt, combined_input, max_new_tokens=64)
-            cleaned = _strip_llava_output(raw_output)
-            data = json.loads(cleaned)
-            preferred = str(data.get("preferred", "A")).strip().upper()
-            confidence = float(data.get("confidence", 0.5))
-            reason = str(data.get("reason", ""))
-        except Exception:
-            m_pref = re.search(r'"?preferred"?\s*:\s*"?(A|B)"?', raw_output if 'raw_output' in locals() else "", re.IGNORECASE)
-            m_conf = re.search(r'"?confidence"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output if 'raw_output' in locals() else "")
-            preferred = m_pref.group(1).upper() if m_pref else "A"
-            confidence = float(m_conf.group(1)) if m_conf else 0.5
-            reason = "Parsed via fallback regex"
 
-        del combined_tensor, combined_input, q_img_tensor
+        # Forward pass 1: A as Video A, B as Video B
+        combined_tensor_ab = torch.cat([q_img_tensor, frames_a, frames_b], dim=0)
+        pref_1 = "A"
+        conf_1 = 0.5
+        reason_1 = ""
+        try:
+            raw_output_1 = llava_inference(prompt, [combined_tensor_ab], max_new_tokens=64)
+            cleaned_1 = _strip_llava_output(raw_output_1)
+            data_1 = json.loads(cleaned_1)
+            pref_1 = str(data_1.get("preferred", "A")).strip().upper()
+            conf_1 = float(data_1.get("confidence", 0.5))
+            reason_1 = str(data_1.get("reason", ""))
+        except Exception:
+            m_pref = re.search(r'"?preferred"?\s*:\s*"?(A|B)"?', raw_output_1 if 'raw_output_1' in locals() else "", re.IGNORECASE)
+            m_conf = re.search(r'"?confidence"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output_1 if 'raw_output_1' in locals() else "")
+            pref_1 = m_pref.group(1).upper() if m_pref else "A"
+            conf_1 = float(m_conf.group(1)) if m_conf else 0.5
+            reason_1 = "Parsed via fallback regex"
+        del combined_tensor_ab
+
+        # Forward pass 2: Inverted order (B as Video A, A as Video B) to test if preference holds
+        combined_tensor_ba = torch.cat([q_img_tensor, frames_b, frames_a], dim=0)
+        pref_2 = "B"
+        conf_2 = 0.5
+        reason_2 = ""
+        try:
+            raw_output_2 = llava_inference(prompt, [combined_tensor_ba], max_new_tokens=64)
+            cleaned_2 = _strip_llava_output(raw_output_2)
+            data_2 = json.loads(cleaned_2)
+            # In pass 2: "A" in prompt corresponds to Cand B, "B" in prompt corresponds to Cand A!
+            raw_pref_2 = str(data_2.get("preferred", "A")).strip().upper()
+            pref_2 = "B" if raw_pref_2 == "A" else "A"
+            conf_2 = float(data_2.get("confidence", 0.5))
+            reason_2 = str(data_2.get("reason", ""))
+        except Exception:
+            m_pref = re.search(r'"?preferred"?\s*:\s*"?(A|B)"?', raw_output_2 if 'raw_output_2' in locals() else "", re.IGNORECASE)
+            m_conf = re.search(r'"?confidence"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output_2 if 'raw_output_2' in locals() else "")
+            raw_pref_2 = m_pref.group(1).upper() if m_pref else "A"
+            pref_2 = "B" if raw_pref_2 == "A" else "A"
+            conf_2 = float(m_conf.group(1)) if m_conf else 0.5
+            reason_2 = "Parsed via fallback regex"
+        del combined_tensor_ba, q_img_tensor
         torch.cuda.empty_cache()
 
-        if preferred not in ("A", "B"):
+        # Aggregate symmetric decisions:
+        if pref_1 == "B" and pref_2 == "B":
+            preferred = "B"
+            confidence = (conf_1 + conf_2) / 2.0
+            reason = f"Consistent preference for B across both orientations ({reason_1})"
+        elif pref_1 == "A" and pref_2 == "A":
             preferred = "A"
+            confidence = (conf_1 + conf_2) / 2.0
+            reason = f"Consistent preference for A across both orientations ({reason_1})"
+        else:
+            # Order inconsistency (position bias detected) -> resolve by highest confidence
+            if conf_2 > conf_1 and pref_2 == "B":
+                preferred = "B"
+                confidence = conf_2
+                reason = f"Resolved position conflict in favor of B (conf={conf_2:.2f}): {reason_2}"
+            else:
+                preferred = "A"
+                confidence = conf_1
+                reason = f"Resolved position conflict in favor of A (conf={conf_1:.2f}): {reason_1}"
 
         return preferred, confidence, reason
 
@@ -756,28 +799,19 @@ class ReAgentV:
         for rank, item in enumerate(llava_sorted):
             llava_rank_map[item["path"]] = (rank + 1) if item["verdict"] != "NO_MATCH" else 99
 
-        # 3. Compute hybrid and RRF fusion scores
-        k_rrf = 20.0
-        max_rrf = (0.5 / (k_rrf + 1)) + (0.5 / (k_rrf + 1))  # ~0.0476
+        # ── Pointwise Linear Hybrid Scoring ──
+        # Combines CLIP similarity and LLaVA fine-grained relevance
         reranked = []
-
         for item in evaluated_candidates:
             path = item["path"]
-            r_c = clip_rank_map[path]
-            r_l = llava_rank_map[path]
-
-            rrf = (0.5 / (k_rrf + r_c)) + (0.5 / (k_rrf + r_l))
-            rrf_norm = rrf / max_rrf
-
             effective_rel = min(item["rel_score"] * 0.3, 0.2) if item["verdict"] == "NO_MATCH" else item["rel_score"]
             linear_hybrid = hybrid_alpha * item["clip_score"] + (1.0 - hybrid_alpha) * effective_rel
             if item["verdict"] == "NO_MATCH":
                 linear_hybrid *= 0.3
 
-            final_score = 0.60 * linear_hybrid + 0.40 * rrf_norm
-            reranked.append((path, round(final_score, 4), item["verdict"]))
+            reranked.append((path, round(linear_hybrid, 4), item["verdict"]))
 
-        # Sort by final fused score descending
+        # Sort by final hybrid score descending
         reranked.sort(key=lambda x: x[1], reverse=True)
 
         # ── VRAgent-inspired Pairwise Tournament Tie-Breaker for Top-2 Candidates ──
@@ -790,13 +824,13 @@ class ReAgentV:
             rel_2 = score_cache.get(c2_path, (0.0, ""))[0]
 
             # Trigger tournament when Top-1 and Top-2 are in close competition:
-            # 1) Score margin is narrow (<= 0.035), OR
-            # 2) Both are high-relevance matches (>= 0.70) with margin <= 0.06, OR
-            # 3) Both achieved "MATCH" verdict with margin <= 0.06
+            # 1) Score margin is narrow (<= 0.05), OR
+            # 2) Both are high-relevance matches (>= 0.70) with margin <= 0.08, OR
+            # 3) Both achieved "MATCH" verdict with margin <= 0.08
             trigger_tournament = (
-                (score_margin <= 0.035) or
-                (rel_1 >= 0.70 and rel_2 >= 0.70 and score_margin <= 0.06) or
-                (verdict_1 == "MATCH" and verdict_2 == "MATCH" and score_margin <= 0.06)
+                (score_margin <= 0.05) or
+                (rel_1 >= 0.70 and rel_2 >= 0.70 and score_margin <= 0.08) or
+                (verdict_1 == "MATCH" and verdict_2 == "MATCH" and score_margin <= 0.08)
             )
 
             if trigger_tournament:
@@ -808,7 +842,7 @@ class ReAgentV:
                     query_image, query_text, c1_path, c2_path, tensor_cache=tensor_cache
                 )
 
-                if winner == "B" and conf >= 0.60:
+                if winner == "B" and conf >= 0.55:
                     reranked[0] = (c2_path, round(score_1 + 0.001, 4), verdict_2)
                     reranked[1] = (c1_path, round(score_2, 4), verdict_1)
                     print(f"  >>> Result: Winner is B ({os.path.basename(c2_path)}) over A (conf={conf:.2f}). Reason: {reason}")
@@ -999,10 +1033,9 @@ class ReAgentV:
                 best_reward = scalar_reward
                 print(f"[ReAgentV] Improved results in iteration {iteration + 1} with reward {scalar_reward:.3f}")
 
-            # Margin-aware Early Exit: If Top-1 has high reward and decisive margin over Top-2, stop early
-            top_margin = (reranked[0][1] - reranked[1][1]) if len(reranked) >= 2 else 1.0
-            if (scalar_reward >= reward_threshold) or (scalar_reward >= 0.88 and top_margin >= 0.015):
-                print(f"[ReAgentV] Decisive Top-1 hit (reward={scalar_reward:.3f}, margin={top_margin:.4f}) — early stopping to preserve accuracy.")
+            # Early stopping strictly when true reward_threshold is met
+            if scalar_reward >= reward_threshold:
+                print(f"[ReAgentV] High confidence hit (reward={scalar_reward:.3f} >= threshold={reward_threshold}) — stopping early.")
                 break
 
             # Stagnation early exit: if retry iteration yields no improvement over baseline, stop early
@@ -1011,7 +1044,7 @@ class ReAgentV:
                 break
 
             if not memory.should_continue(scalar_reward, iteration):
-                print(f"[ReAgentV] Stopping: reward={scalar_reward:.3f} >= threshold={reward_threshold} or max iterations reached.")
+                print(f"[ReAgentV] Stopping: max iterations reached.")
                 break
 
         print(memory.summary())
