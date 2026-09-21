@@ -333,27 +333,25 @@ class ReAgentV:
 
         prompt = covr_reason_target_prompt_template.format(edit_prompt=query_text)
         try:
-            raw_output = llava_inference(prompt, vision_input, max_new_tokens=48)
+            raw_output = llava_inference(prompt, vision_input, max_new_tokens=256)
             cleaned = _strip_llava_output(raw_output)
-            # Remove any unwanted quotes or line breaks
-            cleaned = cleaned.replace("\n", " ").replace('"', '').strip()
-            # If the output starts with descriptive prefixes, clean them
-            lower_clean = cleaned.lower()
-            prefixes_to_strip = [
-                "the target video shows",
-                "the target video depicts",
-                "the target video is",
-                "target video:",
-                "description:",
-            ]
-            for prefix in prefixes_to_strip:
-                if lower_clean.startswith(prefix):
-                    cleaned = cleaned[len(prefix):].strip(" :,-")
-                    break
+            
+            # Parse JSON
+            try:
+                data = json.loads(cleaned)
+                target_desc = data.get("target_video_description", "").strip()
+                if target_desc:
+                    print(f"[ReAgentV Reason] Target simulation: '{target_desc}'")
+                    return target_desc
+            except json.JSONDecodeError:
+                # Regex fallback
+                import re
+                m = re.search(r'"?target_video_description"?\s*:\s*"([^"]+)"', cleaned, re.IGNORECASE)
+                if m:
+                    target_desc = m.group(1).strip()
+                    print(f"[ReAgentV Reason] Target simulation (Regex): '{target_desc}'")
+                    return target_desc
 
-            if cleaned:
-                print(f"[ReAgentV Reason] Target simulation: '{cleaned}'")
-                return cleaned
         except Exception as e:
             print(f"[ReAgentV Reason] simulate_target_description failed: {e}")
 
@@ -593,15 +591,32 @@ class ReAgentV:
             del q_img_tensor
             return "A", 0.5, "Failed to load candidate video tensors"
 
-        # Extract 2 representative keyframes each (total frames = 1 + 2 + 2 = 5)
-        frames_a = vid_a_tensor[0][:2] if vid_a_tensor[0].shape[0] >= 2 else vid_a_tensor[0]
-        frames_b = vid_b_tensor[0][:2] if vid_b_tensor[0].shape[0] >= 2 else vid_b_tensor[0]
+        # Extract 1 representative keyframe each (the last frame usually shows the completed edit)
+        idx_a = vid_a_tensor[0].shape[0] - 1
+        idx_b = vid_b_tensor[0].shape[0] - 1
+        frame_a = vid_a_tensor[0][idx_a:idx_a+1].to(torch.float32)
+        frame_b = vid_b_tensor[0][idx_b:idx_b+1].to(torch.float32)
+
+        _, _, H, W = frame_a.shape
+        divider_width = 4
+        w_half = (W - divider_width) // 2
+        w_rest = W - w_half - divider_width
+
+        import torch.nn.functional as F
+        frame_a_half = F.interpolate(frame_a, size=(H, w_half), mode='bilinear', align_corners=False)
+        frame_b_half = F.interpolate(frame_b, size=(H, w_rest), mode='bilinear', align_corners=False)
+        
+        # Create a solid divider line (e.g. max pixel value to act as a white line)
+        divider = torch.full((1, frame_a.shape[1], H, divider_width), frame_a.max().item(), dtype=torch.float32, device=frame_a.device)
+        
+        stitched_ab = torch.cat([frame_a_half, divider, frame_b_half], dim=3).to(dev, dtype=torch.float16)
+        stitched_ba = torch.cat([frame_b_half, divider, frame_a_half], dim=3).to(dev, dtype=torch.float16)
 
         # --- Symmetric Debiased Tournament (Evaluate A-vs-B and B-vs-A to eliminate position bias) ---
         prompt = covr_pairwise_tournament_template.format(edit_prompt=query_text)
 
         # Forward pass 1: A as Video A, B as Video B
-        combined_tensor_ab = torch.cat([q_img_tensor, frames_a, frames_b], dim=0)
+        combined_tensor_ab = torch.cat([q_img_tensor, stitched_ab], dim=0)
         pref_1 = "A"
         conf_1 = 0.5
         reason_1 = ""
@@ -621,7 +636,7 @@ class ReAgentV:
         del combined_tensor_ab
 
         # Forward pass 2: Inverted order (B as Video A, A as Video B) to test if preference holds
-        combined_tensor_ba = torch.cat([q_img_tensor, frames_b, frames_a], dim=0)
+        combined_tensor_ba = torch.cat([q_img_tensor, stitched_ba], dim=0)
         pref_2 = "B"
         conf_2 = 0.5
         reason_2 = ""
@@ -753,19 +768,37 @@ class ReAgentV:
 
             prompt = covr_rerank_prompt_template.format(edit_prompt=query_text)
             try:
-                raw_output = llava_inference(prompt, combined_input, max_new_tokens=32)
+                raw_output = llava_inference(prompt, combined_input, max_new_tokens=96)
                 cleaned = _strip_llava_output(raw_output)
                 data = json.loads(cleaned)
-                rel_score = float(data.get("relevance_score", clip_score))
-                verdict = data.get("verdict", "PARTIAL_MATCH")
-            except Exception:
-                m = re.search(r'"?relevance_score"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output if 'raw_output' in locals() else "")
-                if m:
-                    rel_score = float(m.group(1))
-                    verdict = "PARTIAL_MATCH"
+                
+                # Check modification_executed explicitly
+                mod_exec_val = data.get("modification_executed", True)
+                if isinstance(mod_exec_val, str):
+                    mod_exec = mod_exec_val.lower() == "true"
                 else:
-                    rel_score = clip_score * 0.5
-                    verdict = "PARTIAL_MATCH"
+                    mod_exec = bool(mod_exec_val)
+                    
+                if not mod_exec:
+                    rel_score = 0.10
+                    verdict = "NO_MATCH"
+                else:
+                    rel_score = float(data.get("relevance_score", clip_score))
+                    verdict = data.get("verdict", "PARTIAL_MATCH")
+            except Exception:
+                # Fallback Regex
+                m_mod = re.search(r'"?modification_executed"?\s*:\s*(true|false)', raw_output if 'raw_output' in locals() else "", re.IGNORECASE)
+                if m_mod and m_mod.group(1).lower() == "false":
+                    rel_score = 0.10
+                    verdict = "NO_MATCH"
+                else:
+                    m = re.search(r'"?relevance_score"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output if 'raw_output' in locals() else "")
+                    if m:
+                        rel_score = float(m.group(1))
+                        verdict = "PARTIAL_MATCH"
+                    else:
+                        rel_score = clip_score * 0.5
+                        verdict = "PARTIAL_MATCH"
 
             # Store in cache for future iterations
             score_cache[video_path] = (rel_score, verdict)

@@ -29,17 +29,23 @@ You are a Video Retrieval Judge evaluating if a Candidate Video satisfies a Comp
 [Goal]
 Judge whether the Candidate Video (Frames 2-5) preserves relevant scene context from the Reference Image (Frame 1) while successfully applying the Edit Instruction.
 
-[Scoring Principles (0.00 to 1.00)]
-Judge how well the Candidate Video fulfills the Edit Instruction:
-- 0.90 - 1.00: Clearly and unmistakably shows the requested modification (new entity, action, color change, or state change). If the edit asks to change or replace something, the video showing the new state is correct.
-- 0.70 - 0.89: The requested change is present, but subtle or brief.
-- 0.40 - 0.69: Partially related theme or environment, but does not clearly show the requested modification.
-- 0.10 - 0.39: Fails the edit instruction, shows wrong object/action, or retains the entity that was instructed to be changed/removed. CRITICAL: If the Candidate Video is identical to the Reference Image and does NOT execute the edit (e.g. ribbon color is unchanged, original object is unchanged), score it 0.10 (NO_MATCH).
-- 0.00: Completely irrelevant or unrelated scene.
+[Checklist Verification]
+Evaluate the Candidate Video using this 3-point Boolean verification checklist:
+1. context_preserved: Does the video preserve the background/environment of the reference? (true/false)
+2. modification_executed: Does the video clearly and unmistakably execute the edit (new color, object, action)? (true/false). CRITICAL: If the video is identical to the reference or unedited, this MUST be false.
+3. negative_eliminated: Is the old entity/state removed/absent? (true/false)
+
+[Scoring Principles]
+- 0.90 - 1.00: 3/3 checklist items passed (MATCH).
+- 0.65 - 0.80: 2/3 checklist items passed (PARTIAL_MATCH).
+- 0.10: modification_executed is false (NO_MATCH).
 
 [Output Format]
 Output ONLY a concise JSON object:
 {{
+  "context_preserved": <boolean>,
+  "modification_executed": <boolean>,
+  "negative_eliminated": <boolean>,
   "relevance_score": <float between 0.0 and 1.0>,
   "verdict": "<MATCH | PARTIAL_MATCH | NO_MATCH>"
 }}
@@ -131,11 +137,15 @@ Follow these rules strictly:
 1. Synthesize the context from the Reference Image with the changes in the Edit Instruction.
 2. Focus on the resulting visual state: subject, action, visual appearance, and surrounding environment.
 3. Crucial: Do NOT include things that were removed, replaced, or absent after the change.
-4. Keep it concise, descriptive, and focused on visual elements (1 to 2 short sentences, under 30 words).
 
 [Output Format]
-Return ONLY the concise visual description of the target video scene without introductory phrases:
-Example: "a person riding a bicycle down an asphalt road during sunset with trees in the background"
+Output ONLY a concise JSON object with the following fields:
+{{
+  "initial_scene_analysis": "<brief description of subject, background, starting attributes>",
+  "required_transformation": "<the exact change, action, or new attribute required>",
+  "strictly_forbidden_negatives": ["<list of entities/colors/states that MUST NOT appear>"],
+  "target_video_description": "<concise visual query under 25 words capturing ONLY the final desired state without hallucinated extra attributes>"
+}}
 """
 
 
@@ -151,9 +161,8 @@ You are a Composed Video Retrieval Judge choosing between Video A and Video B.
 The user wants to find the target video that results from applying an Edit Instruction to a Reference Image.
 
 [Visual Inputs]
-- Frame 1: Reference Image (initial state).
-- Frames 2, 3: Candidate Video A.
-- Frames 4, 5: Candidate Video B.
+- Image 1: Reference Image (initial state).
+- Image 2: A stitched comparison grid (Left side = Candidate Video A, Right side = Candidate Video B).
 
 [Edit Instruction]
 {edit_prompt}
@@ -161,7 +170,7 @@ The user wants to find the target video that results from applying an Edit Instr
 [Evaluation Rules]
 1. TRANSFORMATION IS PARAMOUNT: The primary goal is that the Candidate Video MUST clearly execute the Edit Instruction (the requested new object, action, or state change).
 2. DO NOT PENALIZE INTENDED CHANGES: If the Edit Instruction asks to change or replace something (e.g. "make the billboard blank", "replace cow with goat", "change ribbon color", "make the tree lit", "in yellow"), the candidate video that shows the new state is CORRECT, even if its appearance, color, or text differs from the reference image.
-3. Compare Video A and Video B objectively:
+3. Compare Video A (Left) and Video B (Right) objectively:
    - Does Video A or Video B show the requested modification more clearly, completely, and prominently?
    - If Video B executes the edit better or more cleanly, choose "B".
    - If Video A executes the edit better or more cleanly, choose "A".
