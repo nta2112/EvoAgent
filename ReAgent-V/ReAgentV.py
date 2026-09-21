@@ -688,6 +688,7 @@ class ReAgentV:
         score_cache: Optional[Dict[str, Tuple[float, str]]] = None,
         tensor_cache: Optional[Dict[str, List[torch.Tensor]]] = None,
         enable_tournament: bool = True,
+        target_sim: Optional[str] = None,
     ) -> List[Tuple[str, float, str]]:
         """
         Stage 2 — Fine-grained Agentic Reranking using LLaVA + Reciprocal Rank Fusion + Pairwise Tournament.
@@ -766,7 +767,10 @@ class ReAgentV:
             combined_tensor = torch.cat([q_img_tensor, vid_tensor[0]], dim=0)
             combined_input = [combined_tensor]
 
-            prompt = covr_rerank_prompt_template.format(edit_prompt=query_text)
+            if target_sim:
+                prompt = covr_rerank_prompt_template.format(edit_prompt=query_text, target_sim=target_sim)
+            else:
+                prompt = covr_rerank_prompt_template.format(edit_prompt=query_text, target_sim=query_text)
             try:
                 raw_output = llava_inference(prompt, combined_input, max_new_tokens=96)
                 cleaned = _strip_llava_output(raw_output)
@@ -1039,6 +1043,7 @@ class ReAgentV:
                 score_cache=_score_cache,
                 tensor_cache=_tensor_cache,
                 enable_tournament=enable_tournament,
+                target_sim=reasoned_desc,
             )
 
             if not reranked:

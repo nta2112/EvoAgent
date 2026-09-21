@@ -26,14 +26,18 @@ You are a Video Retrieval Judge evaluating if a Candidate Video satisfies a Comp
 [Edit Instruction]
 {edit_prompt}
 
+[Expected Target State]
+{target_sim}
+
 [Goal]
-Judge whether the Candidate Video (Frames 2-5) preserves relevant scene context from the Reference Image (Frame 1) while successfully applying the Edit Instruction.
+Judge whether the Candidate Video (Frames 2-5) preserves relevant scene context from the Reference Image (Frame 1) while successfully applying the Edit Instruction to match the Expected Target State.
 
 [Checklist Verification]
 Evaluate the Candidate Video using this 3-point Boolean verification checklist:
 1. context_preserved: Does the Candidate Video preserve the general background or environment of the Reference Image? (true/false)
-2. modification_executed: Does the Candidate Video successfully show the NEW state, object, or action requested by the Edit Instruction? (true/false). CRITICAL: If the Candidate Video looks exactly the same as the Reference Image (meaning the requested change is MISSING or the original object is unchanged), this MUST be false.
+2. modification_executed: Does the Candidate Video successfully show the NEW state, object, or action requested by the Edit Instruction? (true/false)
 3. negative_eliminated: Is the old entity or original state (that was supposed to be replaced/changed) completely ABSENT from the Candidate Video? (true/false)
+
 
 [Scoring Principles]
 - 0.90 - 1.00: 3/3 checklist items passed (MATCH).
