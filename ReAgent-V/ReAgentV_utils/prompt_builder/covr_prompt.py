@@ -136,19 +136,19 @@ You are given a Reference Image (showing the starting scene/context) and an Edit
 {edit_prompt}
 
 [Goal]
-Predict and describe what the resulting TARGET VIDEO looks like after applying the Edit Instruction.
+Predict the essential visual keywords and core elements required in the TARGET VIDEO after applying the Edit Instruction.
 Follow these rules strictly:
 1. Synthesize the context from the Reference Image with the changes in the Edit Instruction.
-2. Focus on the resulting visual state: subject, action, visual appearance, and surrounding environment.
-3. Crucial: Do NOT include things that were removed, replaced, or absent after the change.
+2. Focus ONLY on the essential subject, action, or state change. Do NOT invent or hallucinate specific background details, environments (e.g., "black background", "clear sky"), or unrequested accessories (e.g., "glasses", "uniform") unless they are strictly required by the Edit Instruction.
+3. Keep the target description flexible and focused on core visual elements rather than an overly specific, rigid sentence.
+4. Crucial: Do NOT include things that were removed, replaced, or absent after the change.
 
 [Output Format]
 Output ONLY a concise JSON object with the following fields:
 {{
-  "initial_scene_analysis": "<brief description of subject, background, starting attributes>",
+  "initial_scene_analysis": "<brief description of the starting core subject>",
   "required_transformation": "<the exact change, action, or new attribute required>",
-  "strictly_forbidden_negatives": ["<list of entities/colors/states that MUST NOT appear>"],
-  "target_video_description": "<concise visual query under 25 words capturing ONLY the final desired state without hallucinated extra attributes>"
+  "target_video_description": "<a flexible, keyword-focused description (under 20 words) capturing ONLY the essential final state without any hallucinated extra attributes or background details>"
 }}
 """
 
