@@ -339,6 +339,15 @@ class ReAgentV:
             # Parse JSON
             try:
                 data = json.loads(cleaned)
+                if "target_video_keywords" in data:
+                    keywords = data["target_video_keywords"]
+                    if isinstance(keywords, list):
+                        target_desc = ", ".join(keywords)
+                    else:
+                        target_desc = str(keywords)
+                    if target_desc:
+                        print(f"[ReAgentV Reason] Target simulation: '{target_desc}'")
+                        return target_desc
                 target_desc = data.get("target_video_description", "").strip()
                 if target_desc:
                     print(f"[ReAgentV Reason] Target simulation: '{target_desc}'")
@@ -949,7 +958,7 @@ class ReAgentV:
         max_iterations: int = 2,
         reward_threshold: float = 0.92,
         hybrid_alpha: float = 0.70,
-        use_reasoning: bool = False,
+        use_reasoning: bool = True,
         candidate_pool_size: int = 50,
         enable_tournament: bool = True,
     ) -> List[Tuple[str, float, str]]:
