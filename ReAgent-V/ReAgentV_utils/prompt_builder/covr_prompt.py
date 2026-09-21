@@ -34,7 +34,7 @@ Judge how well the Candidate Video fulfills the Edit Instruction:
 - 0.90 - 1.00: Clearly and unmistakably shows the requested modification (new entity, action, color change, or state change). If the edit asks to change or replace something, the video showing the new state is correct.
 - 0.70 - 0.89: The requested change is present, but subtle or brief.
 - 0.40 - 0.69: Partially related theme or environment, but does not clearly show the requested modification.
-- 0.10 - 0.39: Fails the edit instruction, shows wrong object/action, or retains the entity that was instructed to be changed/removed.
+- 0.10 - 0.39: Fails the edit instruction, shows wrong object/action, or retains the entity that was instructed to be changed/removed. CRITICAL: If the Candidate Video is identical to the Reference Image and does NOT execute the edit (e.g. ribbon color is unchanged, original object is unchanged), score it 0.10 (NO_MATCH).
 - 0.00: Completely irrelevant or unrelated scene.
 
 [Output Format]

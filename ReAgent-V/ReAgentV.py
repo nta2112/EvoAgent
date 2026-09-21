@@ -654,27 +654,12 @@ class ReAgentV:
             confidence = (conf_1 + conf_2) / 2.0
             reason = f"Consistent preference for A across both orientations ({reason_1})"
         else:
-            # Order inconsistency (position bias detected where model tended to pick first option)
-            # Inspect the reasons for explicit preference of B over A:
-            b_favored_in_reason = any(
-                phrase in (reason_1 + " " + reason_2).lower()
-                for phrase in [
-                    "video b shows", "video b more", "video b better", "video b accurately",
-                    "prefer b", "prefers b", "choosing b", "candidate b"
-                ]
-            )
-            if pref_2 == "B" and (conf_2 > conf_1 or b_favored_in_reason):
-                preferred = "B"
-                confidence = max(conf_1, conf_2)
-                reason = f"Inverted orientation confirmed B with decisive evidence: {reason_2}"
-            elif pref_1 == "B" and (conf_1 > conf_2 or b_favored_in_reason):
-                preferred = "B"
-                confidence = max(conf_1, conf_2)
-                reason = f"Forward orientation confirmed B with decisive evidence: {reason_1}"
-            else:
-                preferred = "A"
-                confidence = max(conf_1, conf_2)
-                reason = f"Maintained A under ambiguous tie: {reason_1}"
+            # Order inconsistency (position bias detected: model tended to pick slot B or slot A in both passes)
+            # Under position ambiguity or conflict, Candidate A (the incumbent Top-1 from hybrid retrieval)
+            # MUST be strictly preserved. We never overturn Candidate A on an inconsistent tournament signal.
+            preferred = "A"
+            confidence = conf_1
+            reason = f"Preserved incumbent Top-1 candidate A under position tie: {reason_1}"
 
         return preferred, confidence, reason
 
