@@ -32,21 +32,34 @@ You are a Video Retrieval Judge evaluating if a Candidate Video satisfies a Comp
 [Goal]
 Judge whether the Candidate Video (Frames 2-5) preserves relevant scene context from the Reference Image (Frame 1) while successfully applying the Edit Instruction to match the Expected Target State.
 
-[Evaluation Rules]
-1. COMPARE FRAME 1 VS FRAMES 2-5 CAREFULLY:
-   - What was the original state/object in Reference Frame 1?
-   - What NEW state, object, or action does the Edit Instruction demand?
-2. DETECT UNMODIFIED FALSE POSITIVES (STRICT RULE):
-   - If the Candidate Video (Frames 2-5) looks almost identical to Reference Frame 1 and fails to execute the edit (e.g. ribbon color is still the original color, billboard still has advertisements, person does not have glasses, forest has no fog, lines are still white), it is an UNMODIFIED FALSE POSITIVE.
-   - For an unmodified false positive, you MUST output verdict "NO_MATCH" and relevance_score 0.10. Do NOT hallucinate that an unedited video has the edit!
-3. VALID TRANSFORMATION:
-   - If the Candidate Video clearly executes the Edit Instruction while preserving the background/context, output verdict "MATCH" and relevance_score 0.90 - 1.00.
+[Multi-Aspect Continuous Evaluation Criteria (0.000 to 1.000)]
+Evaluate the Candidate Video across 3 independent axes:
+1. s_edit (Transformation Fidelity, 0.000 - 1.000):
+   - 0.950 - 1.000: Flawlessly and completely executes the Edit Instruction.
+   - 0.800 - 0.940: Clearly executes the edit, with minor visual imperfections.
+   - 0.400 - 0.790: Partial, incomplete, or ambiguous execution.
+   - 0.000 - 0.390: Fails to execute the edit, or UNMODIFIED FALSE POSITIVE (looks almost identical to Frame 1 and fails to execute the edit, e.g. ribbon still original color, billboard still has ads, no glasses, no fog, lines still white).
+2. s_preservation (Context Preservation, 0.000 - 1.000):
+   - 0.950 - 1.000: Faithfully preserves background, environment, and unmodified elements from Frame 1.
+   - 0.700 - 0.940: Preserves the general scene layout and setting.
+   - 0.000 - 0.690: Completely different environment, scene, or replaces unrequested objects.
+3. s_temporal (Temporal Consistency, 0.000 - 1.000):
+   - 0.900 - 1.000: Smooth, coherent motion and natural progression across Frames 2-5.
+   - 0.500 - 0.890: Static or slightly jerky frames.
+
+[Verdict & Scoring Rules]
+- If s_edit <= 0.390 (unmodified false positive or wrong action), set verdict "NO_MATCH" and relevance_score 0.10.
+- Otherwise, compute: relevance_score = 0.50 * s_edit + 0.35 * s_preservation + 0.15 * s_temporal.
+- If relevance_score >= 0.80, verdict is "MATCH", else "PARTIAL_MATCH".
 
 [Output Format]
 Output ONLY a concise JSON object:
 {{
-  "visual_analysis": "<1-2 sentences: specify what is in Frame 1 and whether Frames 2-5 actually show the requested new state or remain unedited>",
-  "relevance_score": <float between 0.0 and 1.0, e.g. 0.95 for true match, 0.10 for unedited/false positive>,
+  "visual_analysis": "<1-2 sentences: specify what is in Frame 1, how Frames 2-5 execute the edit, and whether context is preserved>",
+  "s_edit": <float 0.000 to 1.000>,
+  "s_preservation": <float 0.000 to 1.000>,
+  "s_temporal": <float 0.000 to 1.000>,
+  "relevance_score": <float 0.000 to 1.000>,
   "verdict": "<MATCH | PARTIAL_MATCH | NO_MATCH>"
 }}
 """
@@ -163,26 +176,33 @@ The user wants to find the target video that results from applying an Edit Instr
 [Visual Inputs]
 You are provided a sequence of 3 frames:
 - Frame 1: Reference Image (initial state).
-- Frame 2: Candidate Video A.
-- Frame 3: Candidate Video B.
+- Frame 2: Candidate Video A (Incumbent leading candidate).
+- Frame 3: Candidate Video B (Challenger candidate).
 
 [Edit Instruction]
 {edit_prompt}
 
-[Evaluation Rules]
-1. TRANSFORMATION IS PARAMOUNT: The primary goal is that the Candidate Video MUST clearly execute the Edit Instruction (the requested new object, action, or state change).
-2. DO NOT PENALIZE INTENDED CHANGES: If the Edit Instruction asks to change or replace something, the candidate video that shows the new state is CORRECT, even if its appearance differs from the reference image.
-3. Compare Candidate Video A (Frame 2) and Candidate Video B (Frame 3) objectively:
-   - Does Video A or Video B show the requested modification more clearly, completely, and prominently?
-   - If Video A (Frame 2) executes the edit better or more cleanly, choose "A".
-   - If Video B (Frame 3) executes the edit better or more cleanly, choose "B".
+[Evaluation Rules & Incumbent Shield]
+1. EDIT FIDELITY (s_edit_a, s_edit_b on scale 0.000 to 1.000):
+   - How accurately and prominently does each candidate execute the requested edit/action?
+2. CONTEXT PRESERVATION (s_preservation_a, s_preservation_b on scale 0.000 to 1.000):
+   - How well does each candidate preserve the environment, background, and unmodified subjects from Reference Frame 1?
+   - Crucial: If Candidate B modifies everything indiscriminately (e.g., turning all objects yellow when only one was requested, losing the scene layout), it FAILS context preservation.
+3. INCUMBENT SHIELD RULE:
+   - Candidate A is the incumbent leading candidate. Candidate B is the challenger.
+   - Choose "B" ONLY IF Candidate B demonstrates a decisively superior edit execution (s_edit_b - s_edit_a > 0.05) AND preserves reference scene context at least as well as Candidate A (s_preservation_b >= s_preservation_a).
+   - If Candidate A already executes the edit well, or if Candidate B degrades the original background/setting, or if the comparison is close, CHOOSE "A" to preserve the incumbent.
 
 [Output Format]
 Output ONLY a concise JSON object:
 {{
+  "s_edit_a": <float 0.000 to 1.000>,
+  "s_edit_b": <float 0.000 to 1.000>,
+  "s_preservation_a": <float 0.000 to 1.000>,
+  "s_preservation_b": <float 0.000 to 1.000>,
   "preferred": "<A | B>",
-  "confidence": <float from 0.5 to 1.0>,
-  "reason": "<brief 1-sentence explanation comparing how A and B execute the edit>"
+  "confidence": <float from 0.50 to 1.00>,
+  "reason": "<1-2 sentence explanation comparing edit fidelity and context preservation between A and B>"
 }}
 """
 

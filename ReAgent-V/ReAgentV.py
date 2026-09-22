@@ -474,8 +474,28 @@ class ReAgentV:
             query_image, query_text, alpha, query_expansion_hint, reasoned_description=reasoned_description
         )  # [1, D]
 
+        # Module 3: Negative Vector Repulsion (Rocchio Feedback)
+        # Shift search center away from clusters of rejected candidates
+        if exclude_paths:
+            path_to_idx = {p: i for i, p in enumerate(corpus_paths)}
+            q_adapted = query_feat.clone().to(device=corpus_embeddings.device, dtype=torch.float32)
+            repelled_count = 0
+            for neg_path in exclude_paths:
+                if neg_path in path_to_idx:
+                    neg_idx = path_to_idx[neg_path]
+                    neg_feat = corpus_embeddings[neg_idx:neg_idx+1].to(device=q_adapted.device, dtype=torch.float32)
+                    q_adapted = q_adapted - 0.20 * neg_feat
+                    repelled_count += 1
+            if repelled_count > 0:
+                query_feat = F.normalize(q_adapted, p=2, dim=-1)
+                print(f"[ReAgentV Rocchio] Applied negative vector repulsion for {repelled_count} excluded candidates.")
+            else:
+                query_feat = query_feat.to(device=corpus_embeddings.device, dtype=torch.float32)
+        else:
+            query_feat = query_feat.to(device=corpus_embeddings.device, dtype=torch.float32)
+
         # Fast GPU/CPU cosine similarity against entire corpus [N]
-        sims_composed = (corpus_embeddings @ query_feat.T).squeeze(-1)  # [N]
+        sims_composed = (corpus_embeddings.to(dtype=torch.float32) @ query_feat.T).squeeze(-1)  # [N]
 
         # VRAgent-inspired Target Scene Alignment:
         # If reasoned_description is present, also compute direct text-to-video alignment
@@ -489,9 +509,9 @@ class ReAgentV:
                 )
                 target_inputs = {k: v.to(clip_device) for k, v in target_inputs.items()}
                 target_feat = self.clip_model.get_text_features(**target_inputs)
-                target_feat = F.normalize(target_feat.float(), dim=-1).cpu()
+                target_feat = F.normalize(target_feat.float(), dim=-1).to(device=corpus_embeddings.device)
 
-            sims_target = (corpus_embeddings @ target_feat.T).squeeze(-1)
+            sims_target = (corpus_embeddings.to(dtype=torch.float32) @ target_feat.T).squeeze(-1)
             sims_final = 0.60 * sims_target + 0.40 * sims_composed
         else:
             sims_final = sims_composed
@@ -606,86 +626,152 @@ class ReAgentV:
         frame_a = vid_a_tensor[0][idx_a:idx_a+1].to(dev, dtype=torch.float16)
         frame_b = vid_b_tensor[0][idx_b:idx_b+1].to(dev, dtype=torch.float16)
 
-        # --- Symmetric Debiased Tournament (Evaluate A-vs-B and B-vs-A to eliminate position bias) ---
+        # --- Symmetric Debiased Tournament with Incumbent Context Shield ---
         prompt = covr_pairwise_tournament_template.format(edit_prompt=query_text)
 
-        # Forward pass 1: Frame 2 is Video A, Frame 3 is Video B
+        def _extract_tournament_json(text: str) -> Optional[dict]:
+            if not text:
+                return None
+            c = _strip_llava_output(text)
+            m = re.search(r'\{.*\}', c, re.DOTALL)
+            if m:
+                try:
+                    return json.loads(m.group(0))
+                except Exception:
+                    pass
+            try:
+                return json.loads(c)
+            except Exception:
+                return None
+
+        # Forward pass 1: Frame 2 is Candidate A (Incumbent), Frame 3 is Candidate B (Challenger)
         combined_tensor_ab = torch.cat([q_img_tensor, frame_a, frame_b], dim=0)
-        pref_1 = "A"
-        conf_1 = 0.5
-        reason_1 = ""
+        pref_1, conf_1, reason_1 = "A", 0.5, ""
+        s_edit_a_1, s_edit_b_1 = 0.5, 0.5
+        s_pres_a_1, s_pres_b_1 = 0.5, 0.5
+
         try:
             raw_output_1 = llava_inference(prompt, [combined_tensor_ab], max_new_tokens=256)
-            cleaned_1 = _strip_llava_output(raw_output_1)
-            data_1 = json.loads(cleaned_1)
-            pref_1 = str(data_1.get("preferred", "A")).strip().upper()
-            conf_1 = float(data_1.get("confidence", 0.5))
-            reason_1 = str(data_1.get("reason", ""))
+            data_1 = _extract_tournament_json(raw_output_1)
+            if data_1 and isinstance(data_1, dict):
+                pref_1 = str(data_1.get("preferred", "A")).strip().upper()
+                conf_1 = float(data_1.get("confidence", 0.5))
+                reason_1 = str(data_1.get("reason", ""))
+                s_edit_a_1 = float(data_1.get("s_edit_a", 0.5))
+                s_edit_b_1 = float(data_1.get("s_edit_b", 0.5))
+                s_pres_a_1 = float(data_1.get("s_preservation_a", 0.5))
+                s_pres_b_1 = float(data_1.get("s_preservation_b", 0.5))
+            else:
+                raise ValueError("Regex fallback required")
         except Exception:
             m_pref = re.search(r'"?preferred"?\s*:\s*"?.*?\b(A|B)\b"?', raw_output_1 if 'raw_output_1' in locals() else "", re.IGNORECASE)
             m_conf = re.search(r'"?confidence"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output_1 if 'raw_output_1' in locals() else "")
+            m_ea = re.search(r'"?s_edit_a"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output_1 if 'raw_output_1' in locals() else "")
+            m_eb = re.search(r'"?s_edit_b"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output_1 if 'raw_output_1' in locals() else "")
+            m_pa = re.search(r'"?s_preservation_a"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output_1 if 'raw_output_1' in locals() else "")
+            m_pb = re.search(r'"?s_preservation_b"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output_1 if 'raw_output_1' in locals() else "")
             pref_1 = m_pref.group(1).upper() if m_pref else "A"
             conf_1 = float(m_conf.group(1)) if m_conf else 0.5
+            s_edit_a_1 = float(m_ea.group(1)) if m_ea else 0.5
+            s_edit_b_1 = float(m_eb.group(1)) if m_eb else 0.5
+            s_pres_a_1 = float(m_pa.group(1)) if m_pa else 0.5
+            s_pres_b_1 = float(m_pb.group(1)) if m_pb else 0.5
             reason_1 = "Parsed via fallback regex"
         del combined_tensor_ab
 
-        # Forward pass 2: Inverted order (B as Video A, A as Video B) to test if preference holds
+        # Forward pass 2: Inverted order (B as Video A in prompt, A as Video B in prompt)
         combined_tensor_ba = torch.cat([q_img_tensor, frame_b, frame_a], dim=0)
-        pref_2 = "B"
-        conf_2 = 0.5
-        reason_2 = ""
+        pref_2, conf_2, reason_2 = "B", 0.5, ""
+        s_edit_a_2, s_edit_b_2 = 0.5, 0.5
+        s_pres_a_2, s_pres_b_2 = 0.5, 0.5
+
         try:
             raw_output_2 = llava_inference(prompt, [combined_tensor_ba], max_new_tokens=256)
-            cleaned_2 = _strip_llava_output(raw_output_2)
-            data_2 = json.loads(cleaned_2)
-            # In pass 2: "A" in prompt corresponds to Cand B, "B" in prompt corresponds to Cand A!
-            raw_pref_2 = str(data_2.get("preferred", "A")).strip().upper()
-            pref_2 = "B" if raw_pref_2 == "A" else "A"
-            conf_2 = float(data_2.get("confidence", 0.5))
-            reason_2 = str(data_2.get("reason", ""))
+            data_2 = _extract_tournament_json(raw_output_2)
+            if data_2 and isinstance(data_2, dict):
+                # In pass 2: prompt Video A is Cand B, prompt Video B is Cand A
+                raw_pref_2 = str(data_2.get("preferred", "A")).strip().upper()
+                pref_2 = "B" if raw_pref_2 == "A" else "A"
+                conf_2 = float(data_2.get("confidence", 0.5))
+                reason_2 = str(data_2.get("reason", ""))
+                s_edit_b_2 = float(data_2.get("s_edit_a", 0.5))
+                s_edit_a_2 = float(data_2.get("s_edit_b", 0.5))
+                s_pres_b_2 = float(data_2.get("s_preservation_a", 0.5))
+                s_pres_a_2 = float(data_2.get("s_preservation_b", 0.5))
+            else:
+                raise ValueError("Regex fallback required")
         except Exception:
             m_pref = re.search(r'"?preferred"?\s*:\s*"?.*?\b(A|B)\b"?', raw_output_2 if 'raw_output_2' in locals() else "", re.IGNORECASE)
             m_conf = re.search(r'"?confidence"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output_2 if 'raw_output_2' in locals() else "")
+            m_ea = re.search(r'"?s_edit_a"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output_2 if 'raw_output_2' in locals() else "")
+            m_eb = re.search(r'"?s_edit_b"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output_2 if 'raw_output_2' in locals() else "")
+            m_pa = re.search(r'"?s_preservation_a"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output_2 if 'raw_output_2' in locals() else "")
+            m_pb = re.search(r'"?s_preservation_b"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output_2 if 'raw_output_2' in locals() else "")
             raw_pref_2 = m_pref.group(1).upper() if m_pref else "A"
             pref_2 = "B" if raw_pref_2 == "A" else "A"
             conf_2 = float(m_conf.group(1)) if m_conf else 0.5
+            s_edit_b_2 = float(m_ea.group(1)) if m_ea else 0.5
+            s_edit_a_2 = float(m_eb.group(1)) if m_eb else 0.5
+            s_pres_b_2 = float(m_pa.group(1)) if m_pa else 0.5
+            s_pres_a_2 = float(m_pb.group(1)) if m_pb else 0.5
             reason_2 = "Parsed via fallback regex"
         del combined_tensor_ba, q_img_tensor
         torch.cuda.empty_cache()
 
-        # Aggregate symmetric decisions:
+        # Compute multi-aspect averages across both orientations:
+        avg_edit_a = (s_edit_a_1 + s_edit_a_2) / 2.0
+        avg_edit_b = (s_edit_b_1 + s_edit_b_2) / 2.0
+        avg_pres_a = (s_pres_a_1 + s_pres_a_2) / 2.0
+        avg_pres_b = (s_pres_b_1 + s_pres_b_2) / 2.0
+        avg_conf = (conf_1 + conf_2) / 2.0
+
+        edit_diff = avg_edit_b - avg_edit_a
+        pres_diff = avg_pres_b - avg_pres_a
+
+        # ── Module 2B: Incumbent Context Shield Decision Logic ──
+        # Candidate A is Incumbent (already ranked Top-1). Candidate B is Challenger.
+        # Candidate B can overturn A ONLY IF:
+        # 1) Candidate B demonstrates decisive superior edit execution (edit_diff > 0.05)
+        # 2) AND Candidate B preserves context at least as well as A (pres_diff >= -0.02)
         if pref_1 == "B" and pref_2 == "B":
-            preferred = "B"
-            confidence = (conf_1 + conf_2) / 2.0
-            reason = f"Consistent preference for B across both orientations ({reason_1})"
-        elif pref_1 == "A" and pref_2 == "A":
-            preferred = "A"
-            confidence = (conf_1 + conf_2) / 2.0
-            reason = f"Consistent preference for A across both orientations ({reason_1})"
-        else:
-            # Order inconsistency (position bias detected where model tended to pick slot B)
-            # Inspect the reasons for explicit preference of B over A:
-            b_favored_in_reason = any(
-                phrase in reason_1.lower()
-                for phrase in [
-                    "video b shows", "video b more", "video b better", "video b accurately",
-                    "video b clearly", "candidate video b", "prefer b", "prefers b", "choosing b", "candidate b"
-                ]
-            )
-            # If Pass 1 decisively chose Candidate B with high confidence and explicit visual rationale,
-            # allow Challenger B to overturn the unedited CLIP False Positive:
-            if pref_1 == "B" and (conf_1 >= 0.80 or b_favored_in_reason):
+            if pres_diff < -0.05:
+                preferred = "A"
+                confidence = 0.85
+                reason = (
+                    f"Incumbent Shield: Challenger B executed edit ({avg_edit_b:.2f} vs {avg_edit_a:.2f}) "
+                    f"but degraded reference scene context ({avg_pres_b:.2f} vs {avg_pres_a:.2f}). Retained A."
+                )
+            elif edit_diff > 0.05 and pres_diff >= -0.02:
                 preferred = "B"
-                confidence = conf_1
-                reason = f"Challenger B demonstrated decisive visual execution in Pass 1: {reason_1}"
-            elif pref_2 == "B" and conf_2 >= 0.80:
-                preferred = "B"
-                confidence = conf_2
-                reason = f"Challenger B confirmed in inverted pass: {reason_2}"
+                confidence = avg_conf
+                reason = (
+                    f"Challenger B demonstrated decisive edit superiority ({avg_edit_b:.2f} vs {avg_edit_a:.2f}) "
+                    f"and preserved context ({avg_pres_b:.2f} vs {avg_pres_a:.2f}) across both orientations."
+                )
             else:
                 preferred = "A"
-                confidence = conf_1
-                reason = f"Preserved incumbent Top-1 candidate A under position tie: {reason_1}"
+                confidence = 0.80
+                reason = (
+                    f"Incumbent Shield: Challenger B marginal edit advantage ({edit_diff:.3f} <= 0.05) "
+                    f"insufficient to overturn Incumbent A. Retained A."
+                )
+        elif pref_1 == "A" and pref_2 == "A":
+            preferred = "A"
+            confidence = avg_conf
+            reason = f"Consistent preference for Incumbent A across both orientations ({reason_1})"
+        else:
+            # Order inconsistency (position bias detected where model tended to pick slot B)
+            if edit_diff > 0.15 and pres_diff >= 0.0:
+                preferred = "B"
+                confidence = max(conf_1, conf_2)
+                reason = f"Challenger B demonstrated overwhelming edit execution ({edit_diff:.3f}) despite position variance."
+            else:
+                preferred = "A"
+                confidence = 0.80
+                reason = (
+                    f"Incumbent Shield: Preserved incumbent A under position variance "
+                    f"(edit_diff={edit_diff:.3f}, pres_diff={pres_diff:.3f})."
+                )
 
         return preferred, confidence, reason
 
@@ -695,24 +781,15 @@ class ReAgentV:
         query_text: str,
         candidate_list: List[Tuple[str, float]],
         top_k: int = 5,
-        hybrid_alpha: float = 0.30,
+        hybrid_alpha: float = 0.55,
         score_cache: Optional[Dict[str, Tuple[float, str]]] = None,
         tensor_cache: Optional[Dict[str, List[torch.Tensor]]] = None,
         enable_tournament: bool = True,
         target_sim: Optional[str] = None,
+        exclude_paths: Optional[set] = None,
     ) -> List[Tuple[str, float, str]]:
         """
-        Stage 2 — Fine-grained Agentic Reranking using LLaVA + Reciprocal Rank Fusion + Pairwise Tournament.
-
-        1. LLaVA Fine-Grained Verification:
-           Each candidate is verified against the edit instruction.
-           Candidates judged NO_MATCH receive heavy penalization.
-        2. Reciprocal Rank Fusion (RRF):
-           Combines CLIP visual ranking and LLaVA semantic ranking to prevent discrete
-           score jumps from dominating while preserving continuous discriminability.
-        3. Pairwise Tournament Tie-Breaker:
-           Direct head-to-head comparison between Top-1 and Top-2 when scores are close,
-           resolving the deadlock between near-identical sister clips.
+        Stage 2 — Fine-grained Agentic Reranking using LLaVA + Multi-Aspect Continuous Scoring + Dynamic Hybrid Alpha + Incumbent Shield.
         """
         import re
 
@@ -750,6 +827,18 @@ class ReAgentV:
         evaluated_candidates = []
         for video_path, clip_score in candidate_list:
 
+            # ── Module 3 Hard Blacklist check ─────────────────────────────────
+            if exclude_paths and video_path in exclude_paths:
+                print(f"[Hard Blacklist] Skipping rejected distractor: {os.path.basename(video_path)}")
+                score_cache[video_path] = (0.0, "NO_MATCH")
+                evaluated_candidates.append({
+                    "path": video_path,
+                    "clip_score": float(clip_score),
+                    "rel_score": 0.0,
+                    "verdict": "NO_MATCH",
+                })
+                continue
+
             # ── Cache HIT: reuse previously computed LLaVA score ──────────────
             if video_path in score_cache:
                 rel_score, verdict = score_cache[video_path]
@@ -782,31 +871,68 @@ class ReAgentV:
                 prompt = covr_rerank_prompt_template.format(edit_prompt=query_text, target_sim=target_sim)
             else:
                 prompt = covr_rerank_prompt_template.format(edit_prompt=query_text, target_sim=query_text)
+
+            # Robust JSON extraction with regex guard (User Note 1)
+            raw_output = ""
             try:
                 raw_output = llava_inference(prompt, combined_input, max_new_tokens=256)
                 cleaned = _strip_llava_output(raw_output)
-                data = json.loads(cleaned)
-                
-                rel_score = float(data.get("relevance_score", clip_score))
-                verdict = str(data.get("verdict", "PARTIAL_MATCH")).strip().upper()
-                if verdict == "NO_MATCH" or rel_score <= 0.30:
-                    rel_score = 0.10
-                    verdict = "NO_MATCH"
-            except Exception:
-                # Fallback Regex
-                m_rel = re.search(r'"?relevance_score"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output if 'raw_output' in locals() else "")
-                m_ver = re.search(r'"?verdict"?\s*:\s*"?([^"\s]+)"?', raw_output if 'raw_output' in locals() else "", re.IGNORECASE)
-                
-                rel_score = float(m_rel.group(1)) if m_rel else clip_score * 0.5
-                if m_ver:
-                    verdict = m_ver.group(1).upper()
-                    if verdict == "NO_MATCH" and not m_rel:
-                        rel_score = 0.10
+
+                data = None
+                m_json = re.search(r'\{.*\}', cleaned, re.DOTALL)
+                if m_json:
+                    try:
+                        data = json.loads(m_json.group(0))
+                    except Exception:
+                        data = None
+                if data is None:
+                    try:
+                        data = json.loads(cleaned)
+                    except Exception:
+                        data = None
+
+                if data is not None and isinstance(data, dict):
+                    # Module 2A: Multi-Aspect Continuous Scoring
+                    s_edit = float(data.get("s_edit", -1.0))
+                    s_pres = float(data.get("s_preservation", -1.0))
+                    s_temp = float(data.get("s_temporal", -1.0))
+
+                    if s_edit >= 0.0 and s_pres >= 0.0 and s_temp >= 0.0:
+                        rel_score = round(0.50 * s_edit + 0.35 * s_pres + 0.15 * s_temp, 4)
+                    else:
+                        rel_score = float(data.get("relevance_score", clip_score))
+
+                    verdict = str(data.get("verdict", "PARTIAL_MATCH")).strip().upper()
+                    va = str(data.get("visual_analysis", ""))
                 else:
+                    raise ValueError("JSON parse failed, invoking regex fallback")
+            except Exception:
+                # Fallback Regex for Multi-Aspect fields
+                m_edit = re.search(r'"?s_edit"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output)
+                m_pres = re.search(r'"?s_preservation"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output)
+                m_temp = re.search(r'"?s_temporal"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output)
+                m_rel = re.search(r'"?relevance_score"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output)
+                m_ver = re.search(r'"?verdict"?\s*:\s*"?([^"\s]+)"?', raw_output, re.IGNORECASE)
+
+                if m_edit and m_pres and m_temp:
+                    e = float(m_edit.group(1))
+                    p = float(m_pres.group(1))
+                    t = float(m_temp.group(1))
+                    rel_score = round(0.50 * e + 0.35 * p + 0.15 * t, 4)
+                    verdict = m_ver.group(1).upper() if m_ver else ("MATCH" if rel_score >= 0.80 else "PARTIAL_MATCH")
+                elif m_rel:
+                    rel_score = float(m_rel.group(1))
+                    verdict = m_ver.group(1).upper() if m_ver else "PARTIAL_MATCH"
+                else:
+                    rel_score = clip_score * 0.5
                     verdict = "PARTIAL_MATCH"
+                va = "Parsed via fallback regex"
+
+            if verdict == "NO_MATCH" or rel_score <= 0.30:
+                rel_score = 0.10
+                verdict = "NO_MATCH"
 
             # Print LLaVA's reasoning to debug hallucinations
-            va = data.get("visual_analysis", "") if 'data' in locals() else "Regex Fallback"
             print(f"[Rerank] {os.path.basename(video_path)} -> rel={rel_score:.3f} ({verdict}) | Analysis: {va}")
 
             # Store in cache for future iterations
@@ -823,46 +949,35 @@ class ReAgentV:
         del q_img_tensor
         torch.cuda.empty_cache()
 
-        # ── VRAgent-inspired Reciprocal Rank Fusion (RRF) + Continuous Hybrid Blending ──
-        # 1. Rank by CLIP similarity descending
-        clip_sorted = sorted(evaluated_candidates, key=lambda x: x["clip_score"], reverse=True)
-        clip_rank_map = {item["path"]: rank + 1 for rank, item in enumerate(clip_sorted)}
-
-        # 2. Rank by LLaVA relevance descending (penalizing NO_MATCH)
-        llava_sorted = sorted(
-            evaluated_candidates,
-            key=lambda x: (0.0 if x["verdict"] == "NO_MATCH" else x["rel_score"]),
-            reverse=True
-        )
-        llava_rank_map = {}
-        for rank, item in enumerate(llava_sorted):
-            llava_rank_map[item["path"]] = (rank + 1) if item["verdict"] != "NO_MATCH" else 99
+        # ── Module 2A: Dynamic Hybrid Alpha with Variance Guard (User Note 2) ──
+        valid_llava_scores = [item["rel_score"] for item in evaluated_candidates if item["verdict"] != "NO_MATCH"]
+        if len(valid_llava_scores) < 2:
+            effective_alpha = 0.55
+            print(f"[ReAgentV Dynamic Alpha] Insufficient valid candidates ({len(valid_llava_scores)} < 2) -> alpha_eff=0.55 (baseline fallback)")
+        else:
+            score_var = float(np.var(valid_llava_scores))
+            if score_var < 0.005:
+                effective_alpha = 0.65
+                print(f"[ReAgentV Dynamic Alpha] Score variance={score_var:.5f} < 0.005 -> alpha_eff=0.65 (relying on continuous CLIP)")
+            else:
+                effective_alpha = 0.40
+                print(f"[ReAgentV Dynamic Alpha] Score variance={score_var:.5f} >= 0.005 -> alpha_eff=0.40 (relying on discriminative LLaVA)")
 
         # ── Pointwise Linear Hybrid Scoring ──
-        # Combines CLIP similarity and LLaVA fine-grained relevance
         reranked = []
-        clip_top1_path = clip_sorted[0]["path"] if clip_sorted else None
-        clip_top1_score = clip_sorted[0]["clip_score"] if clip_sorted else 0.0
-        clip_top2_score = clip_sorted[1]["clip_score"] if len(clip_sorted) > 1 else 0.0
-        clip_top1_margin = clip_top1_score - clip_top2_score
-
         for item in evaluated_candidates:
             path = item["path"]
             effective_rel = min(item["rel_score"] * 0.3, 0.2) if item["verdict"] == "NO_MATCH" else item["rel_score"]
-            linear_hybrid = hybrid_alpha * item["clip_score"] + (1.0 - hybrid_alpha) * effective_rel
+            linear_hybrid = effective_alpha * item["clip_score"] + (1.0 - effective_alpha) * effective_rel
             if item["verdict"] == "NO_MATCH":
-                linear_hybrid *= 0.3
-
-            # Safeguard decisive CLIP Rank 1: REMOVED. 
-            # Pure CLIP Coarse Search heavily biases false positives with large margins.
-            # Trusting this margin overrides the Agentic score and traps false positives at Rank 1.
+                linear_hybrid *= 0.1
 
             reranked.append((path, round(linear_hybrid, 4), item["verdict"]))
 
         # Sort by final hybrid score descending
         reranked.sort(key=lambda x: x[1], reverse=True)
 
-        # ── VRAgent-inspired Pairwise Tournament Tie-Breaker for Top-2 Candidates ──
+        # ── Module 2B: Pairwise Tournament with Incumbent Shield for Top-2 Candidates ──
         if enable_tournament and len(reranked) >= 2:
             c1_path, score_1, verdict_1 = reranked[0]
             c2_path, score_2, verdict_2 = reranked[1]
@@ -871,9 +986,7 @@ class ReAgentV:
             rel_1 = score_cache.get(c1_path, (0.0, ""))[0]
             rel_2 = score_cache.get(c2_path, (0.0, ""))[0]
 
-            # Trigger tournament strictly when Top-1 and Top-2 are in genuine close competition:
-            # 1) Score margin is very narrow (<= 0.02) AND both have high relevance (>= 0.70), OR
-            # 2) Both achieved "MATCH" verdict with margin <= 0.02
+            # Trigger tournament strictly when Top-1 and Top-2 are in genuine close competition
             trigger_tournament = (
                 (score_margin <= 0.02 and rel_1 >= 0.70 and rel_2 >= 0.70) or
                 (verdict_1 == "MATCH" and verdict_2 == "MATCH" and score_margin <= 0.02)
@@ -881,19 +994,19 @@ class ReAgentV:
 
             if trigger_tournament:
                 print(f"\n[ReAgentV Tournament] Top-2 tie-break triggered (margin={score_margin:.4f}):")
-                print(f"  Candidate A: {os.path.basename(c1_path)} (score={score_1:.4f}, rel={rel_1:.2f})")
-                print(f"  Candidate B: {os.path.basename(c2_path)} (score={score_2:.4f}, rel={rel_2:.2f})")
+                print(f"  Candidate A (Incumbent): {os.path.basename(c1_path)} (score={score_1:.4f}, rel={rel_1:.2f})")
+                print(f"  Candidate B (Challenger): {os.path.basename(c2_path)} (score={score_2:.4f}, rel={rel_2:.2f})")
 
                 winner, conf, reason = self.pairwise_tie_break(
                     query_image, query_text, c1_path, c2_path, tensor_cache=tensor_cache
                 )
 
-                if winner == "B" and conf >= 0.55:
+                if winner == "B":
                     reranked[0] = (c2_path, round(score_1 + 0.001, 4), verdict_2)
                     reranked[1] = (c1_path, round(score_2, 4), verdict_1)
-                    print(f"  >>> Result: Winner is B ({os.path.basename(c2_path)}) over A (conf={conf:.2f}). Reason: {reason}")
+                    print(f"  >>> Result: Winner is Challenger B ({os.path.basename(c2_path)}) over Incumbent A (conf={conf:.2f}). Reason: {reason}")
                 else:
-                    print(f"  >>> Result: Confirmed A ({os.path.basename(c1_path)}) as Top-1 (conf={conf:.2f}). Reason: {reason}")
+                    print(f"  >>> Result: Confirmed Incumbent A ({os.path.basename(c1_path)}) as Top-1 (conf={conf:.2f}). Reason: {reason}")
 
         return reranked[:top_k]
 
@@ -950,7 +1063,7 @@ class ReAgentV:
         top_n_coarse: int = 10,
         max_iterations: int = 2,
         reward_threshold: float = 0.92,
-        hybrid_alpha: float = 0.30,
+        hybrid_alpha: float = 0.55,
         use_reasoning: bool = True,
         candidate_pool_size: int = 50,
         enable_tournament: bool = True,
@@ -1046,6 +1159,7 @@ class ReAgentV:
                 tensor_cache=_tensor_cache,
                 enable_tournament=enable_tournament,
                 target_sim=reasoned_desc,
+                exclude_paths=exclude_paths,
             )
 
             if not reranked:

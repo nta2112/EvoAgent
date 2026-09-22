@@ -116,8 +116,11 @@ class ToolMemoryBank:
         )
         self.history.append(record)
 
-        # Do not blacklist candidates to avoid false negative rejection and protect Recall@K
-        pass
+        # Module 3 Hard Blacklist: exclude Top-1 distractor if rejected by Critic
+        if top_candidates and (scalar_reward < 0.85):
+            rejected_id = top_candidates[0]
+            self.visited_negatives.add(rejected_id)
+            print(f"[MemoryBank] Hard Blacklist added rejected Top-1: {os.path.basename(rejected_id)} (reward={scalar_reward:.3f})")
 
         print(
             f"[MemoryBank] Iter {iteration} | reward={scalar_reward:.3f} | "
