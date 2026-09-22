@@ -952,8 +952,8 @@ class ReAgentV:
         # ── Module 2A: Dynamic Hybrid Alpha with Variance Guard (User Note 2) ──
         valid_llava_scores = [item["rel_score"] for item in evaluated_candidates if item["verdict"] != "NO_MATCH"]
         if len(valid_llava_scores) < 2:
-            effective_alpha = 0.55
-            print(f"[ReAgentV Dynamic Alpha] Insufficient valid candidates ({len(valid_llava_scores)} < 2) -> alpha_eff=0.55 (baseline fallback)")
+            effective_alpha = hybrid_alpha
+            print(f"[ReAgentV Dynamic Alpha] Insufficient valid candidates ({len(valid_llava_scores)} < 2) -> alpha_eff={effective_alpha:.2f} (baseline fallback)")
         else:
             score_var = float(np.var(valid_llava_scores))
             if score_var < 0.005:
