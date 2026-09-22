@@ -615,14 +615,14 @@ class ReAgentV:
         conf_1 = 0.5
         reason_1 = ""
         try:
-            raw_output_1 = llava_inference(prompt, [combined_tensor_ab], max_new_tokens=64)
+            raw_output_1 = llava_inference(prompt, [combined_tensor_ab], max_new_tokens=256)
             cleaned_1 = _strip_llava_output(raw_output_1)
             data_1 = json.loads(cleaned_1)
             pref_1 = str(data_1.get("preferred", "A")).strip().upper()
             conf_1 = float(data_1.get("confidence", 0.5))
             reason_1 = str(data_1.get("reason", ""))
         except Exception:
-            m_pref = re.search(r'"?preferred"?\s*:\s*"?(A|B)"?', raw_output_1 if 'raw_output_1' in locals() else "", re.IGNORECASE)
+            m_pref = re.search(r'"?preferred"?\s*:\s*"?.*?\b(A|B)\b"?', raw_output_1 if 'raw_output_1' in locals() else "", re.IGNORECASE)
             m_conf = re.search(r'"?confidence"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output_1 if 'raw_output_1' in locals() else "")
             pref_1 = m_pref.group(1).upper() if m_pref else "A"
             conf_1 = float(m_conf.group(1)) if m_conf else 0.5
@@ -635,7 +635,7 @@ class ReAgentV:
         conf_2 = 0.5
         reason_2 = ""
         try:
-            raw_output_2 = llava_inference(prompt, [combined_tensor_ba], max_new_tokens=64)
+            raw_output_2 = llava_inference(prompt, [combined_tensor_ba], max_new_tokens=256)
             cleaned_2 = _strip_llava_output(raw_output_2)
             data_2 = json.loads(cleaned_2)
             # In pass 2: "A" in prompt corresponds to Cand B, "B" in prompt corresponds to Cand A!
@@ -644,7 +644,7 @@ class ReAgentV:
             conf_2 = float(data_2.get("confidence", 0.5))
             reason_2 = str(data_2.get("reason", ""))
         except Exception:
-            m_pref = re.search(r'"?preferred"?\s*:\s*"?(A|B)"?', raw_output_2 if 'raw_output_2' in locals() else "", re.IGNORECASE)
+            m_pref = re.search(r'"?preferred"?\s*:\s*"?.*?\b(A|B)\b"?', raw_output_2 if 'raw_output_2' in locals() else "", re.IGNORECASE)
             m_conf = re.search(r'"?confidence"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output_2 if 'raw_output_2' in locals() else "")
             raw_pref_2 = m_pref.group(1).upper() if m_pref else "A"
             pref_2 = "B" if raw_pref_2 == "A" else "A"
@@ -678,7 +678,7 @@ class ReAgentV:
         query_text: str,
         candidate_list: List[Tuple[str, float]],
         top_k: int = 5,
-        hybrid_alpha: float = 0.70,
+        hybrid_alpha: float = 0.30,
         score_cache: Optional[Dict[str, Tuple[float, str]]] = None,
         tensor_cache: Optional[Dict[str, List[torch.Tensor]]] = None,
         enable_tournament: bool = True,
@@ -950,7 +950,7 @@ class ReAgentV:
         top_n_coarse: int = 10,
         max_iterations: int = 2,
         reward_threshold: float = 0.92,
-        hybrid_alpha: float = 0.70,
+        hybrid_alpha: float = 0.30,
         use_reasoning: bool = True,
         candidate_pool_size: int = 50,
         enable_tournament: bool = True,

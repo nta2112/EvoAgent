@@ -74,7 +74,7 @@ def main():
     parser.add_argument("--max_iterations",  type=int,   default=1)
     parser.add_argument("--reward_threshold",type=float, default=0.75)
     parser.add_argument("--alpha",           type=float, default=0.50)
-    parser.add_argument("--hybrid_alpha",    type=float, default=0.70,
+    parser.add_argument("--hybrid_alpha",    type=float, default=0.30,
                         help="Weight for CLIP similarity in hybrid scoring (default: 0.70)")
     parser.add_argument("--disable_reasoning", action="store_true",
                         help="Disable Reason-then-Retrieve target scene simulation")
