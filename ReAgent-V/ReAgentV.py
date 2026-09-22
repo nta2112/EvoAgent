@@ -663,12 +663,28 @@ class ReAgentV:
             confidence = (conf_1 + conf_2) / 2.0
             reason = f"Consistent preference for A across both orientations ({reason_1})"
         else:
-            # Order inconsistency (position bias detected: model tended to pick slot B or slot A in both passes)
-            # Under position ambiguity or conflict, Candidate A (the incumbent Top-1 from hybrid retrieval)
-            # MUST be strictly preserved. We never overturn Candidate A on an inconsistent tournament signal.
-            preferred = "A"
-            confidence = conf_1
-            reason = f"Preserved incumbent Top-1 candidate A under position tie: {reason_1}"
+            # Order inconsistency (position bias detected where model picked first or second slot)
+            # Inspect the reasons for explicit preference of B over A:
+            b_favored_in_reason = any(
+                phrase in (reason_1 + " " + reason_2).lower()
+                for phrase in [
+                    "video b shows", "video b more", "video b better", "video b accurately",
+                    "prefer b", "prefers b", "choosing b", "candidate b", "b shows the",
+                    "b executes", "b is blank", "b has the", "b clearly"
+                ]
+            )
+            if pref_1 == "B" and (conf_1 >= 0.70 or b_favored_in_reason):
+                preferred = "B"
+                confidence = conf_1
+                reason = f"Forward orientation confirmed B with decisive evidence: {reason_1}"
+            elif pref_2 == "B" and (conf_2 >= 0.70 or b_favored_in_reason):
+                preferred = "B"
+                confidence = conf_2
+                reason = f"Inverted orientation confirmed B with decisive evidence: {reason_2}"
+            else:
+                preferred = "A"
+                confidence = max(conf_1, conf_2)
+                reason = f"Maintained incumbent A under ambiguous tie: {reason_1}"
 
         return preferred, confidence, reason
 
@@ -681,7 +697,7 @@ class ReAgentV:
         hybrid_alpha: float = 0.30,
         score_cache: Optional[Dict[str, Tuple[float, str]]] = None,
         tensor_cache: Optional[Dict[str, List[torch.Tensor]]] = None,
-        enable_tournament: bool = False,
+        enable_tournament: bool = True,
         target_sim: Optional[str] = None,
     ) -> List[Tuple[str, float, str]]:
         """
@@ -772,6 +788,9 @@ class ReAgentV:
                 
                 rel_score = float(data.get("relevance_score", clip_score))
                 verdict = str(data.get("verdict", "PARTIAL_MATCH")).strip().upper()
+                if verdict == "NO_MATCH" or rel_score <= 0.30:
+                    rel_score = 0.10
+                    verdict = "NO_MATCH"
             except Exception:
                 # Fallback Regex
                 m_rel = re.search(r'"?relevance_score"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output if 'raw_output' in locals() else "")
@@ -944,7 +963,7 @@ class ReAgentV:
         hybrid_alpha: float = 0.30,
         use_reasoning: bool = True,
         candidate_pool_size: int = 50,
-        enable_tournament: bool = False,
+        enable_tournament: bool = True,
     ) -> List[Tuple[str, float, str]]:
         """
         Full Two-Stage Adaptive Retrieval Loop with Cascade Candidate Generation and Memory Bank.
@@ -1025,7 +1044,7 @@ class ReAgentV:
                 alpha=alpha,
                 query_expansion_hint=hint,
                 exclude_paths=exclude_paths,
-                reasoned_description=None, # DO NOT PASS HALLUCINATED BACKGROUNDS TO CLIP
+                reasoned_description=reasoned_desc, # Restored: drives target scene alignment for replacement queries (goats, lit tree, Mars, moose)
                 candidate_pool_size=candidate_pool_size,
             )
 

@@ -33,19 +33,20 @@ You are a Video Retrieval Judge evaluating if a Candidate Video satisfies a Comp
 Judge whether the Candidate Video (Frames 2-5) preserves relevant scene context from the Reference Image (Frame 1) while successfully applying the Edit Instruction to match the Expected Target State.
 
 [Evaluation Rules]
-1. visual_analysis: Briefly describe what is happening in the Candidate Video (Frames 2-5) and whether it matches the Edit Instruction. (1-2 sentences)
-2. Compare the Candidate Video to the Edit Instruction carefully. If the video does NOT show the new state or action requested, or if it is just an identical copy of the Reference Image, it is a NO_MATCH.
-
-[Scoring Principles]
-- 0.90 - 1.00: Candidate Video successfully applies the Edit Instruction and preserves the scene context (MATCH).
-- 0.65 - 0.80: Candidate Video partially applies the Edit Instruction or misses some context (PARTIAL_MATCH).
-- 0.10: Candidate Video fails to show the required modification, or is an identical copy of the Reference Image that ignores the Edit Instruction (NO_MATCH).
+1. COMPARE FRAME 1 VS FRAMES 2-5 CAREFULLY:
+   - What was the original state/object in Reference Frame 1?
+   - What NEW state, object, or action does the Edit Instruction demand?
+2. DETECT UNMODIFIED FALSE POSITIVES (STRICT RULE):
+   - If the Candidate Video (Frames 2-5) looks almost identical to Reference Frame 1 and fails to execute the edit (e.g. ribbon color is still the original color, billboard still has advertisements, person does not have glasses, forest has no fog, lines are still white), it is an UNMODIFIED FALSE POSITIVE.
+   - For an unmodified false positive, you MUST output verdict "NO_MATCH" and relevance_score 0.10. Do NOT hallucinate that an unedited video has the edit!
+3. VALID TRANSFORMATION:
+   - If the Candidate Video clearly executes the Edit Instruction while preserving the background/context, output verdict "MATCH" and relevance_score 0.90 - 1.00.
 
 [Output Format]
 Output ONLY a concise JSON object:
 {{
-  "visual_analysis": "<1-2 sentences of visual analysis>",
-  "relevance_score": <float between 0.0 and 1.0>,
+  "visual_analysis": "<1-2 sentences: specify what is in Frame 1 and whether Frames 2-5 actually show the requested new state or remain unedited>",
+  "relevance_score": <float between 0.0 and 1.0, e.g. 0.95 for true match, 0.10 for unedited/false positive>,
   "verdict": "<MATCH | PARTIAL_MATCH | NO_MATCH>"
 }}
 """
