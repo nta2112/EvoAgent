@@ -681,7 +681,7 @@ class ReAgentV:
         hybrid_alpha: float = 0.30,
         score_cache: Optional[Dict[str, Tuple[float, str]]] = None,
         tensor_cache: Optional[Dict[str, List[torch.Tensor]]] = None,
-        enable_tournament: bool = True,
+        enable_tournament: bool = False,
         target_sim: Optional[str] = None,
     ) -> List[Tuple[str, float, str]]:
         """
@@ -770,33 +770,20 @@ class ReAgentV:
                 cleaned = _strip_llava_output(raw_output)
                 data = json.loads(cleaned)
                 
-                # Check modification_executed explicitly
-                mod_exec_val = data.get("modification_executed", True)
-                if isinstance(mod_exec_val, str):
-                    mod_exec = mod_exec_val.lower() == "true"
-                else:
-                    mod_exec = bool(mod_exec_val)
-                    
-                if not mod_exec:
-                    rel_score = 0.10
-                    verdict = "NO_MATCH"
-                else:
-                    rel_score = float(data.get("relevance_score", clip_score))
-                    verdict = data.get("verdict", "PARTIAL_MATCH")
+                rel_score = float(data.get("relevance_score", clip_score))
+                verdict = str(data.get("verdict", "PARTIAL_MATCH")).strip().upper()
             except Exception:
                 # Fallback Regex
-                m_mod = re.search(r'"?modification_executed"?\s*:\s*(true|false)', raw_output if 'raw_output' in locals() else "", re.IGNORECASE)
-                if m_mod and m_mod.group(1).lower() == "false":
-                    rel_score = 0.10
-                    verdict = "NO_MATCH"
+                m_rel = re.search(r'"?relevance_score"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output if 'raw_output' in locals() else "")
+                m_ver = re.search(r'"?verdict"?\s*:\s*"?([^"\s]+)"?', raw_output if 'raw_output' in locals() else "", re.IGNORECASE)
+                
+                rel_score = float(m_rel.group(1)) if m_rel else clip_score * 0.5
+                if m_ver:
+                    verdict = m_ver.group(1).upper()
+                    if verdict == "NO_MATCH" and not m_rel:
+                        rel_score = 0.10
                 else:
-                    m = re.search(r'"?relevance_score"?\s*:\s*([0-9]*\.?[0-9]+)', raw_output if 'raw_output' in locals() else "")
-                    if m:
-                        rel_score = float(m.group(1))
-                        verdict = "PARTIAL_MATCH"
-                    else:
-                        rel_score = clip_score * 0.5
-                        verdict = "PARTIAL_MATCH"
+                    verdict = "PARTIAL_MATCH"
 
             # Print LLaVA's reasoning to debug hallucinations
             va = data.get("visual_analysis", "") if 'data' in locals() else "Regex Fallback"
@@ -957,7 +944,7 @@ class ReAgentV:
         hybrid_alpha: float = 0.30,
         use_reasoning: bool = True,
         candidate_pool_size: int = 50,
-        enable_tournament: bool = True,
+        enable_tournament: bool = False,
     ) -> List[Tuple[str, float, str]]:
         """
         Full Two-Stage Adaptive Retrieval Loop with Cascade Candidate Generation and Memory Bank.

@@ -32,26 +32,19 @@ You are a Video Retrieval Judge evaluating if a Candidate Video satisfies a Comp
 [Goal]
 Judge whether the Candidate Video (Frames 2-5) preserves relevant scene context from the Reference Image (Frame 1) while successfully applying the Edit Instruction to match the Expected Target State.
 
-[Checklist Verification]
-Evaluate the Candidate Video using this 4-point verification checklist:
+[Evaluation Rules]
 1. visual_analysis: Briefly describe what is happening in the Candidate Video (Frames 2-5) and whether it matches the Edit Instruction. (1-2 sentences)
-2. context_preserved: Does the Candidate Video preserve the general background or environment of the Reference Image? (true/false)
-3. modification_executed: Does the Candidate Video successfully show the NEW state, object, or action requested by the Edit Instruction? (true/false)
-4. negative_eliminated: Is the old entity or original state (that was supposed to be replaced/changed) completely ABSENT from the Candidate Video? (true/false)
-
+2. Compare the Candidate Video to the Edit Instruction carefully. If the video does NOT show the new state or action requested, or if it is just an identical copy of the Reference Image, it is a NO_MATCH.
 
 [Scoring Principles]
-- 0.90 - 1.00: modification_executed is true AND 2 other checklist items passed (MATCH).
-- 0.65 - 0.80: modification_executed is true BUT 1 other checklist item failed (PARTIAL_MATCH).
-- 0.10: modification_executed is false (NO_MATCH).
+- 0.90 - 1.00: Candidate Video successfully applies the Edit Instruction and preserves the scene context (MATCH).
+- 0.65 - 0.80: Candidate Video partially applies the Edit Instruction or misses some context (PARTIAL_MATCH).
+- 0.10: Candidate Video fails to show the required modification, or is an identical copy of the Reference Image that ignores the Edit Instruction (NO_MATCH).
 
 [Output Format]
 Output ONLY a concise JSON object:
 {{
   "visual_analysis": "<1-2 sentences of visual analysis>",
-  "context_preserved": <boolean>,
-  "modification_executed": <boolean>,
-  "negative_eliminated": <boolean>,
   "relevance_score": <float between 0.0 and 1.0>,
   "verdict": "<MATCH | PARTIAL_MATCH | NO_MATCH>"
 }}
