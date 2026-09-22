@@ -867,40 +867,49 @@ class ReAgentV:
         # Sort by final hybrid score descending
         reranked.sort(key=lambda x: x[1], reverse=True)
 
-        # ── VRAgent-inspired Pairwise Tournament Tie-Breaker for Top-2 Candidates ──
+        # ── VRAgent-inspired Pairwise Tournament Tie-Breaker (King of the Hill) ──
         if enable_tournament and len(reranked) >= 2:
-            c1_path, score_1, verdict_1 = reranked[0]
-            c2_path, score_2, verdict_2 = reranked[1]
-            score_margin = score_1 - score_2
-
-            rel_1 = score_cache.get(c1_path, (0.0, ""))[0]
-            rel_2 = score_cache.get(c2_path, (0.0, ""))[0]
-
-            # Trigger tournament when Top-1 and Top-2 are in close competition:
-            # 1) Score margin is narrow (<= 0.05), OR
-            # 2) Both are high-relevance matches (>= 0.70) with margin <= 0.08, OR
-            # 3) Both achieved "MATCH" verdict with margin <= 0.08
-            trigger_tournament = (
-                (score_margin <= 0.05) or
-                (rel_1 >= 0.70 and rel_2 >= 0.70 and score_margin <= 0.08) or
-                (verdict_1 == "MATCH" and verdict_2 == "MATCH" and score_margin <= 0.08)
-            )
-
-            if trigger_tournament:
-                print(f"\n[ReAgentV Tournament] Top-2 tie-break triggered (margin={score_margin:.4f}):")
-                print(f"  Candidate A: {os.path.basename(c1_path)} (score={score_1:.4f}, rel={rel_1:.2f})")
-                print(f"  Candidate B: {os.path.basename(c2_path)} (score={score_2:.4f}, rel={rel_2:.2f})")
-
-                winner, conf, reason = self.pairwise_tie_break(
-                    query_image, query_text, c1_path, c2_path, tensor_cache=tensor_cache
-                )
-
-                if winner == "B" and conf >= 0.55:
-                    reranked[0] = (c2_path, round(score_1 + 0.001, 4), verdict_2)
-                    reranked[1] = (c1_path, round(score_2, 4), verdict_1)
-                    print(f"  >>> Result: Winner is B ({os.path.basename(c2_path)}) over A (conf={conf:.2f}). Reason: {reason}")
-                else:
-                    print(f"  >>> Result: Confirmed A ({os.path.basename(c1_path)}) as Top-1 (conf={conf:.2f}). Reason: {reason}")
+            top_score = reranked[0][1]
+            candidates_to_tournament = []
+            
+            # Select up to Top-8 candidates that are highly relevant and close in score
+            for i, (p, s, v) in enumerate(reranked[:8]):
+                rel = score_cache.get(p, (0.0, ""))[0]
+                # High relevance (MATCH or PARTIAL_MATCH) and within 0.15 of the top score
+                if (top_score - s <= 0.15) and (rel >= 0.70):
+                    candidates_to_tournament.append((i, p, s, rel))
+            
+            if len(candidates_to_tournament) >= 2:
+                print(f"\n[ReAgentV Tournament] King of the Hill triggered for {len(candidates_to_tournament)} candidates:")
+                for i, p, s, r in candidates_to_tournament:
+                    print(f"  Rank {i+1}: {os.path.basename(p)} (score={s:.4f}, rel={r:.2f})")
+                
+                king_idx = candidates_to_tournament[0][0]
+                king_path = candidates_to_tournament[0][1]
+                
+                for chall_idx, chall_path, chall_s, chall_r in candidates_to_tournament[1:]:
+                    print(f"  [Tournament Match] King ({os.path.basename(king_path)}) vs Challenger ({os.path.basename(chall_path)})")
+                    winner, conf, reason = self.pairwise_tie_break(
+                        query_image, query_text, king_path, chall_path, tensor_cache=tensor_cache
+                    )
+                    
+                    if winner == "B" and conf >= 0.55:
+                        print(f"  >>> Challenger WINS (conf={conf:.2f}). Reason: {reason}")
+                        king_idx = chall_idx
+                        king_path = chall_path
+                    else:
+                        print(f"  >>> King DEFENDS (conf={conf:.2f}). Reason: {reason}")
+                
+                # If the King changed, swap it to Rank 1
+                if king_idx != 0:
+                    old_rank1 = reranked[0]
+                    new_king = reranked[king_idx]
+                    
+                    # Boost score slightly above the old rank 1 to secure its place
+                    new_score = old_rank1[1] + 0.001
+                    reranked[0] = (new_king[0], round(new_score, 4), new_king[2])
+                    reranked[king_idx] = (old_rank1[0], old_rank1[1], old_rank1[2])
+                    print(f"  [Tournament Result] {os.path.basename(king_path)} crowned as definitive Top-1!\n")
 
         return reranked[:top_k]
 
@@ -1041,7 +1050,7 @@ class ReAgentV:
                 alpha=alpha,
                 query_expansion_hint=hint,
                 exclude_paths=exclude_paths,
-                reasoned_description=reasoned_desc,
+                reasoned_description=None, # DO NOT PASS HALLUCINATED BACKGROUNDS TO CLIP
                 candidate_pool_size=candidate_pool_size,
             )
 
