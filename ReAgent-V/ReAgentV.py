@@ -766,7 +766,7 @@ class ReAgentV:
             else:
                 prompt = covr_rerank_prompt_template.format(edit_prompt=query_text, target_sim=query_text)
             try:
-                raw_output = llava_inference(prompt, combined_input, max_new_tokens=96)
+                raw_output = llava_inference(prompt, combined_input, max_new_tokens=256)
                 cleaned = _strip_llava_output(raw_output)
                 data = json.loads(cleaned)
                 
@@ -797,6 +797,10 @@ class ReAgentV:
                     else:
                         rel_score = clip_score * 0.5
                         verdict = "PARTIAL_MATCH"
+
+            # Print LLaVA's reasoning to debug hallucinations
+            va = data.get("visual_analysis", "") if 'data' in locals() else "Regex Fallback"
+            print(f"[Rerank] {os.path.basename(video_path)} -> rel={rel_score:.3f} ({verdict}) | Analysis: {va}")
 
             # Store in cache for future iterations
             score_cache[video_path] = (rel_score, verdict)
