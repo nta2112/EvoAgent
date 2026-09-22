@@ -663,12 +663,29 @@ class ReAgentV:
             confidence = (conf_1 + conf_2) / 2.0
             reason = f"Consistent preference for A across both orientations ({reason_1})"
         else:
-            # Order inconsistency (position bias detected: model tended to pick slot B or slot A in both passes)
-            # Under position ambiguity or conflict, Candidate A (the incumbent Top-1 from hybrid retrieval)
-            # MUST be strictly preserved. We never overturn Candidate A on an inconsistent tournament signal.
-            preferred = "A"
-            confidence = conf_1
-            reason = f"Preserved incumbent Top-1 candidate A under position tie: {reason_1}"
+            # Order inconsistency (position bias detected where model tended to pick slot B)
+            # Inspect the reasons for explicit preference of B over A:
+            b_favored_in_reason = any(
+                phrase in reason_1.lower()
+                for phrase in [
+                    "video b shows", "video b more", "video b better", "video b accurately",
+                    "video b clearly", "candidate video b", "prefer b", "prefers b", "choosing b", "candidate b"
+                ]
+            )
+            # If Pass 1 decisively chose Candidate B with high confidence and explicit visual rationale,
+            # allow Challenger B to overturn the unedited CLIP False Positive:
+            if pref_1 == "B" and (conf_1 >= 0.80 or b_favored_in_reason):
+                preferred = "B"
+                confidence = conf_1
+                reason = f"Challenger B demonstrated decisive visual execution in Pass 1: {reason_1}"
+            elif pref_2 == "B" and conf_2 >= 0.80:
+                preferred = "B"
+                confidence = conf_2
+                reason = f"Challenger B confirmed in inverted pass: {reason_2}"
+            else:
+                preferred = "A"
+                confidence = conf_1
+                reason = f"Preserved incumbent Top-1 candidate A under position tie: {reason_1}"
 
         return preferred, confidence, reason
 
@@ -854,14 +871,12 @@ class ReAgentV:
             rel_1 = score_cache.get(c1_path, (0.0, ""))[0]
             rel_2 = score_cache.get(c2_path, (0.0, ""))[0]
 
-            # Trigger tournament strictly when Top-1 and Top-2 are in close competition:
-            # 1) Score margin is narrow (<= 0.05), OR
-            # 2) Both are high-relevance matches (>= 0.70) with margin <= 0.08, OR
-            # 3) Both achieved "MATCH" verdict with margin <= 0.08
+            # Trigger tournament strictly when Top-1 and Top-2 are in genuine close competition:
+            # 1) Score margin is very narrow (<= 0.02) AND both have high relevance (>= 0.70), OR
+            # 2) Both achieved "MATCH" verdict with margin <= 0.02
             trigger_tournament = (
-                (score_margin <= 0.05) or
-                (rel_1 >= 0.70 and rel_2 >= 0.70 and score_margin <= 0.08) or
-                (verdict_1 == "MATCH" and verdict_2 == "MATCH" and score_margin <= 0.08)
+                (score_margin <= 0.02 and rel_1 >= 0.70 and rel_2 >= 0.70) or
+                (verdict_1 == "MATCH" and verdict_2 == "MATCH" and score_margin <= 0.02)
             )
 
             if trigger_tournament:
