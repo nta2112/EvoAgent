@@ -603,29 +603,14 @@ class ReAgentV:
         # Extract 1 representative keyframe each (the last frame usually shows the completed edit)
         idx_a = vid_a_tensor[0].shape[0] - 1
         idx_b = vid_b_tensor[0].shape[0] - 1
-        frame_a = vid_a_tensor[0][idx_a:idx_a+1].to(torch.float32)
-        frame_b = vid_b_tensor[0][idx_b:idx_b+1].to(torch.float32)
-
-        _, _, H, W = frame_a.shape
-        divider_width = 4
-        w_half = (W - divider_width) // 2
-        w_rest = W - w_half - divider_width
-
-        import torch.nn.functional as F
-        frame_a_half = F.interpolate(frame_a, size=(H, w_half), mode='bilinear', align_corners=False)
-        frame_b_half = F.interpolate(frame_b, size=(H, w_rest), mode='bilinear', align_corners=False)
-        
-        # Create a solid divider line (e.g. max pixel value to act as a white line)
-        divider = torch.full((1, frame_a.shape[1], H, divider_width), frame_a.max().item(), dtype=torch.float32, device=frame_a.device)
-        
-        stitched_ab = torch.cat([frame_a_half, divider, frame_b_half], dim=3).to(dev, dtype=torch.float16)
-        stitched_ba = torch.cat([frame_b_half, divider, frame_a_half], dim=3).to(dev, dtype=torch.float16)
+        frame_a = vid_a_tensor[0][idx_a:idx_a+1].to(dev, dtype=torch.float16)
+        frame_b = vid_b_tensor[0][idx_b:idx_b+1].to(dev, dtype=torch.float16)
 
         # --- Symmetric Debiased Tournament (Evaluate A-vs-B and B-vs-A to eliminate position bias) ---
         prompt = covr_pairwise_tournament_template.format(edit_prompt=query_text)
 
-        # Forward pass 1: A as Video A, B as Video B
-        combined_tensor_ab = torch.cat([q_img_tensor, stitched_ab], dim=0)
+        # Forward pass 1: Frame 2 is Video A, Frame 3 is Video B
+        combined_tensor_ab = torch.cat([q_img_tensor, frame_a, frame_b], dim=0)
         pref_1 = "A"
         conf_1 = 0.5
         reason_1 = ""
@@ -645,7 +630,7 @@ class ReAgentV:
         del combined_tensor_ab
 
         # Forward pass 2: Inverted order (B as Video A, A as Video B) to test if preference holds
-        combined_tensor_ba = torch.cat([q_img_tensor, stitched_ba], dim=0)
+        combined_tensor_ba = torch.cat([q_img_tensor, frame_b, frame_a], dim=0)
         pref_2 = "B"
         conf_2 = 0.5
         reason_2 = ""
@@ -857,10 +842,9 @@ class ReAgentV:
             if item["verdict"] == "NO_MATCH":
                 linear_hybrid *= 0.3
 
-            # Safeguard decisive CLIP Rank 1: if CLIP was strongly confident (margin >= 0.012)
-            # and LLaVA verified it as a valid match (rel >= 0.70), protect its top rank
-            if path == clip_top1_path and clip_top1_margin >= 0.012 and item["verdict"] != "NO_MATCH" and item["rel_score"] >= 0.70:
-                linear_hybrid += 0.02
+            # Safeguard decisive CLIP Rank 1: REMOVED. 
+            # Pure CLIP Coarse Search heavily biases false positives with large margins.
+            # Trusting this margin overrides the Agentic score and traps false positives at Rank 1.
 
             reranked.append((path, round(linear_hybrid, 4), item["verdict"]))
 

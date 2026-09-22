@@ -165,19 +165,21 @@ You are a Composed Video Retrieval Judge choosing between Video A and Video B.
 The user wants to find the target video that results from applying an Edit Instruction to a Reference Image.
 
 [Visual Inputs]
-- Image 1: Reference Image (initial state).
-- Image 2: A stitched comparison grid (Left side = Candidate Video A, Right side = Candidate Video B).
+You are provided a sequence of 3 frames:
+- Frame 1: Reference Image (initial state).
+- Frame 2: Candidate Video A.
+- Frame 3: Candidate Video B.
 
 [Edit Instruction]
 {edit_prompt}
 
 [Evaluation Rules]
 1. TRANSFORMATION IS PARAMOUNT: The primary goal is that the Candidate Video MUST clearly execute the Edit Instruction (the requested new object, action, or state change).
-2. DO NOT PENALIZE INTENDED CHANGES: If the Edit Instruction asks to change or replace something (e.g. "make the billboard blank", "replace cow with goat", "change ribbon color", "make the tree lit", "in yellow"), the candidate video that shows the new state is CORRECT, even if its appearance, color, or text differs from the reference image.
-3. Compare Video A (Left) and Video B (Right) objectively:
+2. DO NOT PENALIZE INTENDED CHANGES: If the Edit Instruction asks to change or replace something, the candidate video that shows the new state is CORRECT, even if its appearance differs from the reference image.
+3. Compare Candidate Video A (Frame 2) and Candidate Video B (Frame 3) objectively:
    - Does Video A or Video B show the requested modification more clearly, completely, and prominently?
-   - If Video B executes the edit better or more cleanly, choose "B".
-   - If Video A executes the edit better or more cleanly, choose "A".
+   - If Video A (Frame 2) executes the edit better or more cleanly, choose "A".
+   - If Video B (Frame 3) executes the edit better or more cleanly, choose "B".
 
 [Output Format]
 Output ONLY a concise JSON object:
