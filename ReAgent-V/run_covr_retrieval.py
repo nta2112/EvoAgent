@@ -42,7 +42,7 @@ DEFAULT_INDEX_PATH = "/kaggle/working/covr_corpus_index.pt"
 
 DEFAULT_CLIP_MODEL  = "/kaggle/input/covr-models/clip-vit-large-patch14-336"
 DEFAULT_WHISPER     = "/kaggle/input/covr-models/whisper-base"
-DEFAULT_LLAVA       = "/kaggle/input/covr-models/LLaVA-Video-7B-Qwen2"
+DEFAULT_LLAVA       = "lmms-lab/llava-onevision-qwen2-7b-ov"
 
 
 def main():

@@ -6,7 +6,7 @@ path_dict = {
     "clip_cache_dir": "models",
     "whisper_model_path": "openai/whisper-base",
     "whisper_cache_dir": "models",
-    "llava_model_path": "lmms-lab/LLaVA-Video-7B-Qwen2",
+    "llava_model_path": "lmms-lab/llava-onevision-qwen2-7b-ov",
     "llava_cache_dir": "models",
 }
 

@@ -61,7 +61,7 @@ def main():
     parser.add_argument("--index_path",      type=str,   required=True)
     parser.add_argument("--clip_model",      type=str,   default="/kaggle/input/covr-models/clip-vit-large-patch14-336")
     parser.add_argument("--whisper_model",   type=str,   default="/kaggle/input/covr-models/whisper-base")
-    parser.add_argument("--llava_model",     type=str,   default="/kaggle/input/covr-models/LLaVA-Video-7B-Qwen2")
+    parser.add_argument("--llava_model",     type=str,   default="lmms-lab/llava-onevision-qwen2-7b-ov")
     parser.add_argument("--num_samples",     type=int,   default=100,
                         help="Number of test queries to evaluate (use 2556 for full benchmark)")
     parser.add_argument("--target_corpus_size", type=int, default=None,

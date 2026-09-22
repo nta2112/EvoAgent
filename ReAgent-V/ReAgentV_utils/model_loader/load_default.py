@@ -403,7 +403,7 @@ def load_default(path_dict):
             print(f"  • GPU {i} [{props.name}]: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved / {total:.2f} GB total")
         if hasattr(model, "hf_device_map"):
             devices_used = set(str(v) for v in model.hf_device_map.values())
-            print(f"  • LLaVA-Video-7B (FP16) sharded across: {sorted(list(devices_used))}")
+            print(f"  • LLaVA Model (FP16) sharded across: {sorted(list(devices_used))}")
         print(f"=======================================================\n")
 
     return {
