@@ -17,45 +17,54 @@ starting from the state shown in the query image.
 
 covr_rerank_prompt_template = """
 [Task]
-You are a Video Retrieval Judge evaluating if a Candidate Video satisfies a Composed Video Retrieval (CoVR) query.
+You are a strict Video Retrieval Judge. Determine whether a Candidate Video actually demonstrates the requested edit — or whether it merely shows an unrelated scene that happens to look superficially similar.
+
+[Critical Warning]
+Be SKEPTICAL. Most candidates will NOT correctly execute the edit. Only a small fraction of candidates truly match. Do NOT assume success — look for concrete visual evidence that the specific edit was applied.
 
 [Visual Input Layout]
-- Frame 1 (first image): The Reference Image representing the starting state.
-- Frames 2, 3, 4, 5 (following images): Sequential keyframes from the Candidate Video showing the resulting state/action.
+- Frame 1 (first image): The Reference Image — the starting visual state.
+- Frames 2-5 (following images): Sequential keyframes from the Candidate Video.
 
 [Edit Instruction]
 {edit_prompt}
 
-[Expected Target State]
-{target_sim}
+[Your Job]
+Compare Frame 1 (before) with Frames 2-5 (after). Ask yourself:
+1. Does the Candidate Video show the SPECIFIC change described in the Edit Instruction? (e.g., if the edit says "add fog", do Frames 2-5 actually show fog? If the edit says "make her angry", does the person actually look angry?)
+2. Is the surrounding context (background, environment, unmodified objects) preserved from Frame 1?
+3. If the video shows a completely different scene, different person, or different object than Frame 1, it is NOT a match — even if the new scene coincidentally contains the target concept.
 
-[Goal]
-Judge whether the Candidate Video (Frames 2-5) preserves relevant scene context from the Reference Image (Frame 1) while successfully applying the Edit Instruction to match the Expected Target State.
+[Calibration Examples]
+- Edit: "add fog" → Video shows clear sunny weather, no fog at all → s_edit=0.15 (NO_MATCH)
+- Edit: "add fog" → Video shows a misty, foggy version of the same scene → s_edit=0.95 (MATCH)
+- Edit: "make her angry" → Video shows a different person smiling → s_edit=0.10 (NO_MATCH)
+- Edit: "have a crowd" → Video shows an empty stadium with no people → s_edit=0.10 (NO_MATCH)
 
-[Multi-Aspect Continuous Evaluation Criteria (0.000 to 1.000)]
-Evaluate the Candidate Video across 3 independent axes:
-1. s_edit (Transformation Fidelity, 0.000 - 1.000):
-   - 0.950 - 1.000: Flawlessly and completely executes the Edit Instruction.
-   - 0.800 - 0.940: Clearly executes the edit, with minor visual imperfections.
-   - 0.400 - 0.790: Partial, incomplete, or ambiguous execution.
-   - 0.000 - 0.390: Fails to execute the edit, or UNMODIFIED FALSE POSITIVE (looks almost identical to Frame 1 and fails to execute the edit, e.g. ribbon still original color, billboard still has ads, no glasses, no fog, lines still white).
-2. s_preservation (Context Preservation, 0.000 - 1.000):
-   - 0.950 - 1.000: Faithfully preserves background, environment, and unmodified elements from Frame 1.
-   - 0.700 - 0.940: Preserves the general scene layout and setting.
-   - 0.000 - 0.690: Completely different environment, scene, or replaces unrequested objects.
-3. s_temporal (Temporal Consistency, 0.000 - 1.000):
-   - 0.900 - 1.000: Smooth, coherent motion and natural progression across Frames 2-5.
-   - 0.500 - 0.890: Static or slightly jerky frames.
+[Multi-Aspect Scoring (0.000 to 1.000)]
+1. s_edit (Transformation Fidelity — MOST IMPORTANT):
+   - 0.900 - 1.000: The SPECIFIC edit is clearly and unmistakably visible in Frames 2-5.
+   - 0.600 - 0.890: The edit is partially visible but incomplete or ambiguous.
+   - 0.300 - 0.590: Weak or questionable evidence of the edit. The video might show something vaguely related but not the actual requested change.
+   - 0.000 - 0.290: The edit is NOT executed. The video is unrelated, shows the wrong action, or is an unmodified false positive.
+2. s_preservation (Context Preservation):
+   - 0.800 - 1.000: Background and unmodified elements from Frame 1 are preserved.
+   - 0.400 - 0.790: Different but thematically similar environment.
+   - 0.000 - 0.390: Completely different scene with no connection to Frame 1.
+3. s_temporal (Temporal Consistency):
+   - 0.800 - 1.000: Smooth, coherent motion across Frames 2-5.
+   - 0.400 - 0.790: Static or jerky frames.
 
-[Verdict & Scoring Rules]
-- If s_edit <= 0.390 (unmodified false positive or wrong action), set verdict "NO_MATCH" and relevance_score 0.10.
-- Otherwise, compute: relevance_score = 0.50 * s_edit + 0.35 * s_preservation + 0.15 * s_temporal.
-- If relevance_score >= 0.80, verdict is "MATCH", else "PARTIAL_MATCH".
+[Verdict Rules]
+- If s_edit < 0.500: verdict is "NO_MATCH" regardless of other scores.
+- If s_edit >= 0.500: compute relevance_score = 0.70 * s_edit + 0.20 * s_preservation + 0.10 * s_temporal.
+  - If relevance_score >= 0.75, verdict is "MATCH".
+  - Otherwise, verdict is "PARTIAL_MATCH".
 
 [Output Format]
-Output ONLY a concise JSON object:
+Output ONLY a JSON object:
 {{
-  "visual_analysis": "<1-2 sentences: specify what is in Frame 1, how Frames 2-5 execute the edit, and whether context is preserved>",
+  "visual_analysis": "<1-2 sentences: what Frame 1 shows, what Frames 2-5 actually show, and whether the specific edit is visually present>",
   "s_edit": <float 0.000 to 1.000>,
   "s_preservation": <float 0.000 to 1.000>,
   "s_temporal": <float 0.000 to 1.000>,

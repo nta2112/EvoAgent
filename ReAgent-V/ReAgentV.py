@@ -512,7 +512,7 @@ class ReAgentV:
                 target_feat = F.normalize(target_feat.float(), dim=-1).to(device=corpus_embeddings.device)
 
             sims_target = (corpus_embeddings.to(dtype=torch.float32) @ target_feat.T).squeeze(-1)
-            sims_final = 0.60 * sims_target + 0.40 * sims_composed
+            sims_final = 0.40 * sims_target + 0.60 * sims_composed
         else:
             sims_final = sims_composed
 
@@ -867,10 +867,7 @@ class ReAgentV:
             combined_tensor = torch.cat([q_img_tensor, vid_tensor[0]], dim=0)
             combined_input = [combined_tensor]
 
-            if target_sim:
-                prompt = covr_rerank_prompt_template.format(edit_prompt=query_text, target_sim=target_sim)
-            else:
-                prompt = covr_rerank_prompt_template.format(edit_prompt=query_text, target_sim=query_text)
+            prompt = covr_rerank_prompt_template.format(edit_prompt=query_text)
 
             # Robust JSON extraction with regex guard (User Note 1)
             raw_output = ""
@@ -892,13 +889,17 @@ class ReAgentV:
                         data = None
 
                 if data is not None and isinstance(data, dict):
-                    # Module 2A: Multi-Aspect Continuous Scoring
+                    # Module 2A: Multi-Aspect Continuous Scoring (s_edit-gated)
                     s_edit = float(data.get("s_edit", -1.0))
                     s_pres = float(data.get("s_preservation", -1.0))
                     s_temp = float(data.get("s_temporal", -1.0))
 
                     if s_edit >= 0.0 and s_pres >= 0.0 and s_temp >= 0.0:
-                        rel_score = round(0.50 * s_edit + 0.35 * s_pres + 0.15 * s_temp, 4)
+                        # Fix 2: s_edit-gated scoring — if edit fidelity is low, reject regardless
+                        if s_edit < 0.50:
+                            rel_score = round(s_edit * 0.5, 4)  # capped at 0.25
+                        else:
+                            rel_score = round(0.70 * s_edit + 0.20 * s_pres + 0.10 * s_temp, 4)
                     else:
                         rel_score = float(data.get("relevance_score", clip_score))
 
@@ -918,8 +919,11 @@ class ReAgentV:
                     e = float(m_edit.group(1))
                     p = float(m_pres.group(1))
                     t = float(m_temp.group(1))
-                    rel_score = round(0.50 * e + 0.35 * p + 0.15 * t, 4)
-                    verdict = m_ver.group(1).upper() if m_ver else ("MATCH" if rel_score >= 0.80 else "PARTIAL_MATCH")
+                    if e < 0.50:
+                        rel_score = round(e * 0.5, 4)
+                    else:
+                        rel_score = round(0.70 * e + 0.20 * p + 0.10 * t, 4)
+                    verdict = m_ver.group(1).upper() if m_ver else ("MATCH" if rel_score >= 0.75 else "PARTIAL_MATCH")
                 elif m_rel:
                     rel_score = float(m_rel.group(1))
                     verdict = m_ver.group(1).upper() if m_ver else "PARTIAL_MATCH"
@@ -928,7 +932,8 @@ class ReAgentV:
                     verdict = "PARTIAL_MATCH"
                 va = "Parsed via fallback regex"
 
-            if verdict == "NO_MATCH" or rel_score <= 0.30:
+            # Enforce s_edit gate: low edit fidelity always means NO_MATCH
+            if verdict == "NO_MATCH" or rel_score <= 0.25:
                 rel_score = 0.10
                 verdict = "NO_MATCH"
 
@@ -949,28 +954,41 @@ class ReAgentV:
         del q_img_tensor
         torch.cuda.empty_cache()
 
-        # ── Module 2A: Dynamic Hybrid Alpha with Variance Guard (User Note 2) ──
+        # ── Module 2A: Dynamic Hybrid Alpha with Variance Guard (Fix 4: adjusted thresholds) ──
         valid_llava_scores = [item["rel_score"] for item in evaluated_candidates if item["verdict"] != "NO_MATCH"]
         if len(valid_llava_scores) < 2:
             effective_alpha = hybrid_alpha
             print(f"[ReAgentV Dynamic Alpha] Insufficient valid candidates ({len(valid_llava_scores)} < 2) -> alpha_eff={effective_alpha:.2f} (baseline fallback)")
         else:
             score_var = float(np.var(valid_llava_scores))
-            if score_var < 0.005:
-                effective_alpha = 0.65
-                print(f"[ReAgentV Dynamic Alpha] Score variance={score_var:.5f} < 0.005 -> alpha_eff=0.65 (relying on continuous CLIP)")
+            if score_var < 0.01:
+                effective_alpha = 0.60
+                print(f"[ReAgentV Dynamic Alpha] Score variance={score_var:.5f} < 0.01 -> alpha_eff=0.60 (relying on CLIP)")
             else:
-                effective_alpha = 0.40
-                print(f"[ReAgentV Dynamic Alpha] Score variance={score_var:.5f} >= 0.005 -> alpha_eff=0.40 (relying on discriminative LLaVA)")
+                effective_alpha = 0.35
+                print(f"[ReAgentV Dynamic Alpha] Score variance={score_var:.5f} >= 0.01 -> alpha_eff=0.35 (relying on discriminative LLaVA)")
 
-        # ── Pointwise Linear Hybrid Scoring ──
+        # ── Pointwise Linear Hybrid Scoring with CLIP Safety Net (Fix 3) ──
         reranked = []
+        # Build a map of original CLIP rank for Safety Net
+        clip_rank_map = {vpath: rank for rank, (vpath, _) in enumerate(candidate_list)}
+        top1_clip_score = candidate_list[0][1] if candidate_list else 0.0
+
         for item in evaluated_candidates:
             path = item["path"]
             effective_rel = min(item["rel_score"] * 0.3, 0.2) if item["verdict"] == "NO_MATCH" else item["rel_score"]
             linear_hybrid = effective_alpha * item["clip_score"] + (1.0 - effective_alpha) * effective_rel
             if item["verdict"] == "NO_MATCH":
                 linear_hybrid *= 0.1
+
+            # Fix 3: CLIP Safety Net — protect CLIP top-3 candidates from catastrophic demotion
+            original_clip_rank = clip_rank_map.get(path, 99)
+            if original_clip_rank <= 2 and item["verdict"] != "NO_MATCH":
+                # CLIP top-3 (0-indexed <=2): ensure they stay competitive
+                clip_floor = 0.90 * top1_clip_score
+                if linear_hybrid < clip_floor:
+                    print(f"[CLIP Safety Net] Preserving CLIP rank {original_clip_rank+1}: {os.path.basename(path)} (floor={clip_floor:.4f}, was={linear_hybrid:.4f})")
+                    linear_hybrid = clip_floor
 
             reranked.append((path, round(linear_hybrid, 4), item["verdict"]))
 
@@ -1062,7 +1080,7 @@ class ReAgentV:
         top_k: int = 5,
         top_n_coarse: int = 10,
         max_iterations: int = 2,
-        reward_threshold: float = 0.92,
+        reward_threshold: float = 0.95,
         hybrid_alpha: float = 0.55,
         use_reasoning: bool = True,
         candidate_pool_size: int = 50,
