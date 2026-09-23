@@ -179,28 +179,28 @@ Output ONLY a concise JSON object with the following fields:
 
 covr_pairwise_tournament_template = """
 [Task]
-You are a Composed Video Retrieval Judge choosing between Video A and Video B.
-The user wants to find the target video that results from applying an Edit Instruction to a Reference Image.
+You are a Video Retrieval Judge comparing two candidate videos: Video A and Video B.
+Determine which candidate better executes the requested Edit Instruction while preserving the context from the Reference Image (Frame 1).
 
 [Visual Inputs]
 You are provided a sequence of 3 frames:
 - Frame 1: Reference Image (initial state).
-- Frame 2: Candidate Video A (Incumbent leading candidate).
-- Frame 3: Candidate Video B (Challenger candidate).
+- Frame 2: Candidate Video A.
+- Frame 3: Candidate Video B.
 
 [Edit Instruction]
 {edit_prompt}
 
-[Evaluation Rules & Incumbent Shield]
-1. EDIT FIDELITY (s_edit_a, s_edit_b on scale 0.000 to 1.000):
-   - How accurately and prominently does each candidate execute the requested edit/action?
+[Comparison Criteria]
+1. EDIT EXECUTION (s_edit_a, s_edit_b on scale 0.000 to 1.000):
+   - Which video more clearly, accurately, and prominently executes the requested change?
 2. CONTEXT PRESERVATION (s_preservation_a, s_preservation_b on scale 0.000 to 1.000):
-   - How well does each candidate preserve the environment, background, and unmodified subjects from Reference Frame 1?
-   - Crucial: If Candidate B modifies everything indiscriminately (e.g., turning all objects yellow when only one was requested, losing the scene layout), it FAILS context preservation.
-3. INCUMBENT SHIELD RULE:
-   - Candidate A is the incumbent leading candidate. Candidate B is the challenger.
-   - Choose "B" ONLY IF Candidate B demonstrates a decisively superior edit execution (s_edit_b - s_edit_a > 0.05) AND preserves reference scene context at least as well as Candidate A (s_preservation_b >= s_preservation_a).
-   - If Candidate A already executes the edit well, or if Candidate B degrades the original background/setting, or if the comparison is close, CHOOSE "A" to preserve the incumbent.
+   - Which video better preserves the background, environment, and unmodified elements from Frame 1?
+   - If a video indiscriminately alters the entire scene or replaces unrequested objects, it fails context preservation.
+3. FAIR DECISION:
+   - Choose "A" if Video A is overall better.
+   - Choose "B" if Video B is overall better.
+   - Rate s_edit and s_preservation objectively for both candidates.
 
 [Output Format]
 Output ONLY a concise JSON object:
@@ -211,7 +211,8 @@ Output ONLY a concise JSON object:
   "s_preservation_b": <float 0.000 to 1.000>,
   "preferred": "<A | B>",
   "confidence": <float from 0.50 to 1.00>,
-  "reason": "<1-2 sentence explanation comparing edit fidelity and context preservation between A and B>"
+  "reason": "<1-2 sentence objective comparison of edit execution and context preservation between A and B>"
 }}
 """
+
 

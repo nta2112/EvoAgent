@@ -583,6 +583,8 @@ class ReAgentV:
         cand_a_path: str,
         cand_b_path: str,
         tensor_cache: Optional[Dict[str, List[torch.Tensor]]] = None,
+        clip_rank_a: int = 99,
+        clip_rank_b: int = 99,
     ) -> Tuple[str, float, str]:
         """
         VRAgent-inspired Pairwise Tournament Tie-Breaker.
@@ -728,52 +730,52 @@ class ReAgentV:
         edit_diff = avg_edit_b - avg_edit_a
         pres_diff = avg_pres_b - avg_pres_a
 
-        # ── Module 2B: Incumbent Context Shield Decision Logic ──
-        # Candidate A is Incumbent (already ranked Top-1). Candidate B is Challenger.
-        # Candidate B can overturn A ONLY IF:
-        # 1) Candidate B demonstrates decisive superior edit execution (edit_diff > 0.05)
-        # 2) AND Candidate B preserves context at least as well as A (pres_diff >= -0.02)
+        # ── Balanced Pairwise Tournament Decision Logic ──
+        b_net = (0.70 * avg_edit_b + 0.30 * avg_pres_b) - (0.70 * avg_edit_a + 0.30 * avg_pres_a)
+
         if pref_1 == "B" and pref_2 == "B":
-            if pres_diff < -0.05:
+            # Both orientations agree Challenger B is superior
+            if pres_diff < -0.08:
                 preferred = "A"
-                confidence = 0.85
+                confidence = 0.80
                 reason = (
                     f"Incumbent Shield: Challenger B executed edit ({avg_edit_b:.2f} vs {avg_edit_a:.2f}) "
                     f"but degraded reference scene context ({avg_pres_b:.2f} vs {avg_pres_a:.2f}). Retained A."
                 )
-            elif edit_diff > 0.05 and pres_diff >= -0.02:
+            else:
                 preferred = "B"
                 confidence = avg_conf
                 reason = (
-                    f"Challenger B demonstrated decisive edit superiority ({avg_edit_b:.2f} vs {avg_edit_a:.2f}) "
+                    f"Challenger B demonstrated decisive superiority ({avg_edit_b:.2f} vs {avg_edit_a:.2f}) "
                     f"and preserved context ({avg_pres_b:.2f} vs {avg_pres_a:.2f}) across both orientations."
-                )
-            else:
-                preferred = "A"
-                confidence = 0.80
-                reason = (
-                    f"Incumbent Shield: Challenger B marginal edit advantage ({edit_diff:.3f} <= 0.05) "
-                    f"insufficient to overturn Incumbent A. Retained A."
                 )
         elif pref_1 == "A" and pref_2 == "A":
             preferred = "A"
             confidence = avg_conf
-            reason = f"Consistent preference for Incumbent A across both orientations ({reason_1})"
+            reason = f"Consistent preference for Candidate A across both orientations ({reason_1})"
         else:
-            # Order inconsistency (position bias detected where model tended to pick slot B)
-            if edit_diff > 0.15 and pres_diff >= 0.0:
+            # Position variance / Split decision:
+            if b_net > 0.02 and pres_diff >= -0.05:
                 preferred = "B"
                 confidence = max(conf_1, conf_2)
-                reason = f"Challenger B demonstrated overwhelming edit execution ({edit_diff:.3f}) despite position variance."
-            else:
+                reason = f"Challenger B demonstrated net score advantage ({b_net:+.3f}) despite position variance."
+            elif b_net < -0.02:
                 preferred = "A"
-                confidence = 0.80
-                reason = (
-                    f"Incumbent Shield: Preserved incumbent A under position variance "
-                    f"(edit_diff={edit_diff:.3f}, pres_diff={pres_diff:.3f})."
-                )
+                confidence = max(conf_1, conf_2)
+                reason = f"Candidate A demonstrated net score advantage ({b_net:+.3f}) despite position variance."
+            else:
+                # Dead heat: use original CLIP coarse rank to break tie
+                if clip_rank_b < clip_rank_a:
+                    preferred = "B"
+                    confidence = 0.70
+                    reason = f"Dead heat tie-break resolved by original CLIP priority: B (rank {clip_rank_b+1}) beats A (rank {clip_rank_a+1})."
+                else:
+                    preferred = "A"
+                    confidence = 0.70
+                    reason = f"Dead heat tie-break: preserved Incumbent A (rank {clip_rank_a+1} vs {clip_rank_b+1})."
 
         return preferred, confidence, reason
+
 
     def agentic_rerank(
         self,
@@ -968,34 +970,40 @@ class ReAgentV:
                 effective_alpha = 0.35
                 print(f"[ReAgentV Dynamic Alpha] Score variance={score_var:.5f} >= 0.01 -> alpha_eff=0.35 (relying on discriminative LLaVA)")
 
-        # ── Pointwise Linear Hybrid Scoring with CLIP Safety Net (Fix 3) ──
+        # ── Pointwise Linear Hybrid Scoring with Normalized CLIP & Safety Net ──
         reranked = []
-        # Build a map of original CLIP rank for Safety Net
         clip_rank_map = {vpath: rank for rank, (vpath, _) in enumerate(candidate_list)}
-        top1_clip_score = candidate_list[0][1] if candidate_list else 0.0
+
+        # Min-max normalization for clip_score within the pool to bring it to [0.0, 1.0] scale
+        clip_scores = [item["clip_score"] for item in evaluated_candidates]
+        min_cs = min(clip_scores) if clip_scores else 0.0
+        max_cs = max(clip_scores) if clip_scores else 1.0
+        cs_range = max(max_cs - min_cs, 1e-4)
 
         for item in evaluated_candidates:
             path = item["path"]
+            norm_clip = (item["clip_score"] - min_cs) / cs_range  # [0.0, 1.0]
             effective_rel = min(item["rel_score"] * 0.3, 0.2) if item["verdict"] == "NO_MATCH" else item["rel_score"]
-            linear_hybrid = effective_alpha * item["clip_score"] + (1.0 - effective_alpha) * effective_rel
+            linear_hybrid = effective_alpha * norm_clip + (1.0 - effective_alpha) * effective_rel
             if item["verdict"] == "NO_MATCH":
                 linear_hybrid *= 0.1
 
-            # Fix 3: CLIP Safety Net — protect CLIP top-3 candidates from catastrophic demotion
+            # CLIP Safety Net Prior Protection for CLIP Top-3 candidates (when not NO_MATCH)
             original_clip_rank = clip_rank_map.get(path, 99)
-            if original_clip_rank <= 2 and item["verdict"] != "NO_MATCH":
-                # CLIP top-3 (0-indexed <=2): ensure they stay competitive
-                clip_floor = 0.90 * top1_clip_score
-                if linear_hybrid < clip_floor:
-                    print(f"[CLIP Safety Net] Preserving CLIP rank {original_clip_rank+1}: {os.path.basename(path)} (floor={clip_floor:.4f}, was={linear_hybrid:.4f})")
-                    linear_hybrid = clip_floor
+            if item["verdict"] != "NO_MATCH":
+                if original_clip_rank == 0:
+                    linear_hybrid += 0.06  # CLIP Rank 1 Prior Protection
+                    print(f"[CLIP Safety Net] Applied Rank 1 Prior Protection (+0.06): {os.path.basename(path)}")
+                elif original_clip_rank in [1, 2]:
+                    linear_hybrid += 0.03  # CLIP Top-3 Prior Protection
+                    print(f"[CLIP Safety Net] Applied Rank {original_clip_rank+1} Prior Protection (+0.03): {os.path.basename(path)}")
 
             reranked.append((path, round(linear_hybrid, 4), item["verdict"]))
 
         # Sort by final hybrid score descending
         reranked.sort(key=lambda x: x[1], reverse=True)
 
-        # ── Module 2B: Pairwise Tournament with Incumbent Shield for Top-2 Candidates ──
+        # ── Module 2B: Pairwise Tournament with Balanced Tie-Breaker for Top-2 Candidates ──
         if enable_tournament and len(reranked) >= 2:
             c1_path, score_1, verdict_1 = reranked[0]
             c2_path, score_2, verdict_2 = reranked[1]
@@ -1004,10 +1012,10 @@ class ReAgentV:
             rel_1 = score_cache.get(c1_path, (0.0, ""))[0]
             rel_2 = score_cache.get(c2_path, (0.0, ""))[0]
 
-            # Trigger tournament strictly when Top-1 and Top-2 are in genuine close competition
+            # Trigger tournament when Top-1 and Top-2 are in close competition
             trigger_tournament = (
-                (score_margin <= 0.02 and rel_1 >= 0.70 and rel_2 >= 0.70) or
-                (verdict_1 == "MATCH" and verdict_2 == "MATCH" and score_margin <= 0.02)
+                (score_margin <= 0.04 and rel_1 >= 0.70 and rel_2 >= 0.70) or
+                (verdict_1 == "MATCH" and verdict_2 == "MATCH" and score_margin <= 0.04)
             )
 
             if trigger_tournament:
@@ -1016,7 +1024,9 @@ class ReAgentV:
                 print(f"  Candidate B (Challenger): {os.path.basename(c2_path)} (score={score_2:.4f}, rel={rel_2:.2f})")
 
                 winner, conf, reason = self.pairwise_tie_break(
-                    query_image, query_text, c1_path, c2_path, tensor_cache=tensor_cache
+                    query_image, query_text, c1_path, c2_path, tensor_cache=tensor_cache,
+                    clip_rank_a=clip_rank_map.get(c1_path, 99),
+                    clip_rank_b=clip_rank_map.get(c2_path, 99),
                 )
 
                 if winner == "B":
@@ -1025,6 +1035,7 @@ class ReAgentV:
                     print(f"  >>> Result: Winner is Challenger B ({os.path.basename(c2_path)}) over Incumbent A (conf={conf:.2f}). Reason: {reason}")
                 else:
                     print(f"  >>> Result: Confirmed Incumbent A ({os.path.basename(c1_path)}) as Top-1 (conf={conf:.2f}). Reason: {reason}")
+
 
         return reranked[:top_k]
 
