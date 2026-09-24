@@ -429,14 +429,15 @@ class ReAgentV:
             txt_feat = self.clip_model.get_text_features(**txt_inputs)   # [1, D]
             txt_feat = F.normalize(txt_feat.float(), dim=-1)
 
-        # Balanced Visual-Semantic Fusion:
-        # Grounded in CoVR benchmark findings where visual context contributes strongly (33.1% standalone)
-        # We ensure a balanced visual contribution (alpha around 0.40 - 0.50) so target entities are found
-        # while strictly preserving scene context, background lighting, and physical structure.
+        # Target-driven Composed Visual Query Encoding:
+        # In Reason-then-Retrieve mode, reasoned_description provides the simulated future target scene
+        # (e.g. 'yellow tulips in a field' or 'goats on a hillside').
+        # eff_alpha MUST remain low (<= 0.15) so the unedited source image does not overpower the target description
+        # and pull distractors (videos matching the unedited state) into coarse top-1.
         if reasoned_description:
-            eff_alpha = max(min(alpha, 0.45), 0.35)
+            eff_alpha = min(alpha, 0.15)
         else:
-            eff_alpha = max(alpha, 0.40)
+            eff_alpha = alpha
 
         # Compose and re-normalise
         query_feat = F.normalize(
@@ -753,7 +754,7 @@ class ReAgentV:
                     f"and preserved context ({avg_pres_b:.2f} vs {avg_pres_a:.2f}) across both orientations."
                 )
         elif pref_1 == "A" and pref_2 == "A":
-            # Both orientations favored A, but check if Challenger B achieved high net edit advantage without context collapse
+            # Both orientations favored A, but check if Challenger B achieved decisive net edit advantage without context collapse
             if b_net >= 0.05 and pres_diff >= -0.04:
                 preferred = "B"
                 confidence = 0.75
@@ -763,38 +764,22 @@ class ReAgentV:
                 confidence = avg_conf
                 reason = f"Consistent preference for Candidate A across both orientations ({reason_1})"
         else:
-            # Position variance / Split decision:
-            if b_net > 0.01 and pres_diff >= -0.05:
+            # Position variance / Split decision / Dead heat:
+            # Candidate A is the reigning Incumbent (Top-1).
+            # To protect Ground Truth from being dethroned by noisy pointwise LLaVA scores or minor variances,
+            # Challenger B must demonstrate a decisive net advantage (b_net >= 0.05) or prior coarse priority.
+            if b_net >= 0.05 and pres_diff >= -0.04:
                 preferred = "B"
                 confidence = max(conf_1, conf_2)
-                reason = f"Challenger B demonstrated net score advantage ({b_net:+.3f}) despite position variance."
-            elif b_net < -0.01:
+                reason = f"Challenger B demonstrated clear net edit fidelity advantage ({b_net:+.3f}) despite position variance."
+            elif clip_rank_b < clip_rank_a and b_net >= 0.02 and pres_diff >= -0.04:
+                preferred = "B"
+                confidence = 0.75
+                reason = f"Challenger B has superior original CLIP coarse priority (rank {clip_rank_b+1} vs {clip_rank_a+1}) and net advantage ({b_net:+.3f})."
+            else:
                 preferred = "A"
                 confidence = max(conf_1, conf_2)
-                reason = f"Candidate A demonstrated net score advantage ({b_net:+.3f}) despite position variance."
-            elif rel_b > rel_a and b_net >= -0.02:
-                # Challenger B has higher standalone relevance score from LLaVA and comparable pairwise fidelity
-                preferred = "B"
-                confidence = 0.75
-                reason = f"Challenger B demonstrated higher standalone semantic relevance ({rel_b:.3f} vs {rel_a:.3f}) and comparable pairwise edit fidelity ({b_net:+.3f})."
-            elif clip_rank_b < clip_rank_a and b_net >= -0.02:
-                preferred = "B"
-                confidence = 0.75
-                reason = f"Challenger B has superior original CLIP coarse priority (rank {clip_rank_b+1} vs {clip_rank_a+1}) with comparable edit fidelity ({b_net:+.3f})."
-            else:
-                # Dead heat: break tie using semantic relevance first, then CLIP priority
-                if rel_b > rel_a:
-                    preferred = "B"
-                    confidence = 0.70
-                    reason = f"Dead heat resolved by standalone LLaVA relevance: B ({rel_b:.3f}) beats A ({rel_a:.3f})."
-                elif clip_rank_b < clip_rank_a:
-                    preferred = "B"
-                    confidence = 0.70
-                    reason = f"Dead heat tie-break resolved by original CLIP priority: B (rank {clip_rank_b+1}) beats A (rank {clip_rank_a+1})."
-                else:
-                    preferred = "A"
-                    confidence = 0.70
-                    reason = f"Dead heat tie-break: preserved Incumbent A (rank {clip_rank_a+1} vs {clip_rank_b+1})."
+                reason = f"Incumbent Shield: Preserved Candidate A as Top-1 against Challenger B under split decision (b_net={b_net:+.3f}, ranks {clip_rank_a+1} vs {clip_rank_b+1})."
 
         return preferred, confidence, reason
 
@@ -1047,13 +1032,10 @@ class ReAgentV:
             rel_1 = score_cache.get(c1_path, (0.0, ""))[0]
             rel_2 = score_cache.get(c2_path, (0.0, ""))[0]
 
-            # Trigger tournament when Top-1 and Top-2 are in genuine competition:
-            # When both Top candidates are MATCH (or both rel >= 0.70), expand margin to 0.15
-            # so that Candidate 2 (who may be ground truth originally ranked CLIP 2-3) gets a head-to-head tie-break
+            # Trigger tournament when Top-1 and Top-2 are in genuine competition (close call):
             trigger_tournament = (
-                (score_margin <= 0.05 and rel_1 >= 0.65 and rel_2 >= 0.65) or
-                (verdict_1 == "MATCH" and verdict_2 == "MATCH" and score_margin <= 0.15) or
-                (rel_1 >= 0.70 and rel_2 >= 0.70 and score_margin <= 0.15)
+                (score_margin <= 0.06 and rel_1 >= 0.65 and rel_2 >= 0.65) or
+                (verdict_1 == "MATCH" and verdict_2 == "MATCH" and score_margin <= 0.08)
             )
 
 
