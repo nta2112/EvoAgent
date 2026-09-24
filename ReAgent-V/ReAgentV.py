@@ -763,6 +763,10 @@ class ReAgentV:
                 preferred = "A"
                 confidence = max(conf_1, conf_2)
                 reason = f"Candidate A demonstrated net score advantage ({b_net:+.3f}) despite position variance."
+            elif clip_rank_b < clip_rank_a and b_net >= -0.01:
+                preferred = "B"
+                confidence = 0.75
+                reason = f"Challenger B has superior original CLIP coarse priority (rank {clip_rank_b+1} vs {clip_rank_a+1}) with comparable edit fidelity ({b_net:+.3f})."
             else:
                 # Dead heat: use original CLIP coarse rank to break tie
                 if clip_rank_b < clip_rank_a:
@@ -775,6 +779,7 @@ class ReAgentV:
                     reason = f"Dead heat tie-break: preserved Incumbent A (rank {clip_rank_a+1} vs {clip_rank_b+1})."
 
         return preferred, confidence, reason
+
 
 
     def agentic_rerank(
@@ -897,15 +902,22 @@ class ReAgentV:
                     s_temp = float(data.get("s_temporal", -1.0))
 
                     if s_edit >= 0.0 and s_pres >= 0.0 and s_temp >= 0.0:
-                        # Fix 2: s_edit-gated scoring — if edit fidelity is low, reject regardless
-                        if s_edit < 0.50:
-                            rel_score = round(s_edit * 0.5, 4)  # capped at 0.25
+                        # Fix 2: s_edit-gated scoring:
+                        # Clear failure (s_edit < 0.35) -> auto NO_MATCH
+                        if s_edit < 0.35:
+                            rel_score = round(s_edit * 0.5, 4)  # capped at 0.175 -> auto NO_MATCH
+                            verdict = "NO_MATCH"
+                        elif s_edit < 0.50:
+                            # Moderate edit execution: PARTIAL_MATCH without being crushed to NO_MATCH
+                            rel_score = round(0.70 * s_edit + 0.20 * s_pres + 0.10 * s_temp, 4)
+                            verdict = "PARTIAL_MATCH"
                         else:
                             rel_score = round(0.70 * s_edit + 0.20 * s_pres + 0.10 * s_temp, 4)
+                            verdict = "MATCH" if rel_score >= 0.75 else "PARTIAL_MATCH"
                     else:
                         rel_score = float(data.get("relevance_score", clip_score))
+                        verdict = str(data.get("verdict", "PARTIAL_MATCH")).strip().upper()
 
-                    verdict = str(data.get("verdict", "PARTIAL_MATCH")).strip().upper()
                     va = str(data.get("visual_analysis", ""))
                 else:
                     raise ValueError("JSON parse failed, invoking regex fallback")
@@ -921,11 +933,15 @@ class ReAgentV:
                     e = float(m_edit.group(1))
                     p = float(m_pres.group(1))
                     t = float(m_temp.group(1))
-                    if e < 0.50:
+                    if e < 0.35:
                         rel_score = round(e * 0.5, 4)
+                        verdict = "NO_MATCH"
+                    elif e < 0.50:
+                        rel_score = round(0.70 * e + 0.20 * p + 0.10 * t, 4)
+                        verdict = "PARTIAL_MATCH"
                     else:
                         rel_score = round(0.70 * e + 0.20 * p + 0.10 * t, 4)
-                    verdict = m_ver.group(1).upper() if m_ver else ("MATCH" if rel_score >= 0.75 else "PARTIAL_MATCH")
+                        verdict = "MATCH" if rel_score >= 0.75 else "PARTIAL_MATCH"
                 elif m_rel:
                     rel_score = float(m_rel.group(1))
                     verdict = m_ver.group(1).upper() if m_ver else "PARTIAL_MATCH"
@@ -935,9 +951,10 @@ class ReAgentV:
                 va = "Parsed via fallback regex"
 
             # Enforce s_edit gate: low edit fidelity always means NO_MATCH
-            if verdict == "NO_MATCH" or rel_score <= 0.25:
+            if verdict == "NO_MATCH" or rel_score < 0.25:
                 rel_score = 0.10
                 verdict = "NO_MATCH"
+
 
             # Print LLaVA's reasoning to debug hallucinations
             print(f"[Rerank] {os.path.basename(video_path)} -> rel={rel_score:.3f} ({verdict}) | Analysis: {va}")
@@ -1012,11 +1029,15 @@ class ReAgentV:
             rel_1 = score_cache.get(c1_path, (0.0, ""))[0]
             rel_2 = score_cache.get(c2_path, (0.0, ""))[0]
 
-            # Trigger tournament when Top-1 and Top-2 are in close competition
+            # Trigger tournament when Top-1 and Top-2 are in genuine competition:
+            # When both Top candidates are MATCH (or both rel >= 0.70), expand margin to 0.15
+            # so that Candidate 2 (who may be ground truth originally ranked CLIP 2-3) gets a head-to-head tie-break
             trigger_tournament = (
-                (score_margin <= 0.04 and rel_1 >= 0.70 and rel_2 >= 0.70) or
-                (verdict_1 == "MATCH" and verdict_2 == "MATCH" and score_margin <= 0.04)
+                (score_margin <= 0.05 and rel_1 >= 0.65 and rel_2 >= 0.65) or
+                (verdict_1 == "MATCH" and verdict_2 == "MATCH" and score_margin <= 0.15) or
+                (rel_1 >= 0.70 and rel_2 >= 0.70 and score_margin <= 0.15)
             )
+
 
             if trigger_tournament:
                 print(f"\n[ReAgentV Tournament] Top-2 tie-break triggered (margin={score_margin:.4f}):")

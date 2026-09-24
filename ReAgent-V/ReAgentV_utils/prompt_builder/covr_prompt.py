@@ -56,10 +56,11 @@ Compare Frame 1 (before) with Frames 2-5 (after). Ask yourself:
    - 0.400 - 0.790: Static or jerky frames.
 
 [Verdict Rules]
-- If s_edit < 0.500: verdict is "NO_MATCH" regardless of other scores.
-- If s_edit >= 0.500: compute relevance_score = 0.70 * s_edit + 0.20 * s_preservation + 0.10 * s_temporal.
+- If s_edit < 0.350: verdict is "NO_MATCH" (unrelated action or unmodified false positive).
+- If s_edit >= 0.350: compute relevance_score = 0.70 * s_edit + 0.20 * s_preservation + 0.10 * s_temporal.
   - If relevance_score >= 0.75, verdict is "MATCH".
   - Otherwise, verdict is "PARTIAL_MATCH".
+
 
 [Output Format]
 Output ONLY a JSON object:
