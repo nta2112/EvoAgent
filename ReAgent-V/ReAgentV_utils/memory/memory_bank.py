@@ -99,6 +99,7 @@ class ToolMemoryBank:
         top_candidates: List[str],
         critic_raw: str,
         scalar_reward: float,
+        safe_candidates: Optional[set] = None,
     ) -> None:
         """Save the outcome of one retrieval + reranking attempt."""
         # Extract short critique summary
@@ -116,11 +117,18 @@ class ToolMemoryBank:
         )
         self.history.append(record)
 
-        # Module 3 Hard Blacklist: exclude Top-1 distractor if rejected by Critic
-        if top_candidates and (scalar_reward < 0.85):
+        # Module 3 Hard Blacklist with Safe Guard:
+        # Exclude Top-1 distractor ONLY if decisively rejected by Critic (reward < 0.50)
+        # AND not protected by visual prior / reranker confirmation
+        if top_candidates and (scalar_reward < 0.50):
             rejected_id = top_candidates[0]
-            self.visited_negatives.add(rejected_id)
-            print(f"[MemoryBank] Hard Blacklist added rejected Top-1: {os.path.basename(rejected_id)} (reward={scalar_reward:.3f})")
+            if safe_candidates and rejected_id in safe_candidates:
+                print(f"[MemoryBank] Safe Blacklist Guard protected candidate: {os.path.basename(rejected_id)} (visual prior/MATCH confirmed, reward={scalar_reward:.3f})")
+            else:
+                self.visited_negatives.add(rejected_id)
+                print(f"[MemoryBank] Hard Blacklist added rejected Top-1: {os.path.basename(rejected_id)} (reward={scalar_reward:.3f})")
+        elif top_candidates and (scalar_reward < 0.85):
+            print(f"[MemoryBank] Candidate {os.path.basename(top_candidates[0])} mildly penalized (reward={scalar_reward:.3f}) but preserved from Hard Blacklist.")
 
         print(
             f"[MemoryBank] Iter {iteration} | reward={scalar_reward:.3f} | "

@@ -429,13 +429,14 @@ class ReAgentV:
             txt_feat = self.clip_model.get_text_features(**txt_inputs)   # [1, D]
             txt_feat = F.normalize(txt_feat.float(), dim=-1)
 
-        # In Reason-then-Retrieve mode, reasoned text is already visually grounded.
-        # We set eff_alpha low (0.15) so the target description drives the search,
-        # preventing old entities in the reference image (e.g., cow) from contaminating target vectors (e.g., goat).
+        # Balanced Visual-Semantic Fusion:
+        # Grounded in CoVR benchmark findings where visual context contributes strongly (33.1% standalone)
+        # We ensure a balanced visual contribution (alpha around 0.40 - 0.50) so target entities are found
+        # while strictly preserving scene context, background lighting, and physical structure.
         if reasoned_description:
-            eff_alpha = min(alpha, 0.15)
+            eff_alpha = max(min(alpha, 0.45), 0.35)
         else:
-            eff_alpha = alpha
+            eff_alpha = max(alpha, 0.40)
 
         # Compose and re-normalise
         query_feat = F.normalize(
@@ -585,6 +586,8 @@ class ReAgentV:
         tensor_cache: Optional[Dict[str, List[torch.Tensor]]] = None,
         clip_rank_a: int = 99,
         clip_rank_b: int = 99,
+        rel_a: float = 0.0,
+        rel_b: float = 0.0,
     ) -> Tuple[str, float, str]:
         """
         VRAgent-inspired Pairwise Tournament Tie-Breaker.
@@ -750,26 +753,41 @@ class ReAgentV:
                     f"and preserved context ({avg_pres_b:.2f} vs {avg_pres_a:.2f}) across both orientations."
                 )
         elif pref_1 == "A" and pref_2 == "A":
-            preferred = "A"
-            confidence = avg_conf
-            reason = f"Consistent preference for Candidate A across both orientations ({reason_1})"
+            # Both orientations favored A, but check if Challenger B achieved high net edit advantage without context collapse
+            if b_net >= 0.05 and pres_diff >= -0.04:
+                preferred = "B"
+                confidence = 0.75
+                reason = f"Challenger B overcame positional preference with superior net edit fidelity ({b_net:+.3f})."
+            else:
+                preferred = "A"
+                confidence = avg_conf
+                reason = f"Consistent preference for Candidate A across both orientations ({reason_1})"
         else:
             # Position variance / Split decision:
-            if b_net > 0.02 and pres_diff >= -0.05:
+            if b_net > 0.01 and pres_diff >= -0.05:
                 preferred = "B"
                 confidence = max(conf_1, conf_2)
                 reason = f"Challenger B demonstrated net score advantage ({b_net:+.3f}) despite position variance."
-            elif b_net < -0.02:
+            elif b_net < -0.01:
                 preferred = "A"
                 confidence = max(conf_1, conf_2)
                 reason = f"Candidate A demonstrated net score advantage ({b_net:+.3f}) despite position variance."
-            elif clip_rank_b < clip_rank_a and b_net >= -0.01:
+            elif rel_b > rel_a and b_net >= -0.02:
+                # Challenger B has higher standalone relevance score from LLaVA and comparable pairwise fidelity
+                preferred = "B"
+                confidence = 0.75
+                reason = f"Challenger B demonstrated higher standalone semantic relevance ({rel_b:.3f} vs {rel_a:.3f}) and comparable pairwise edit fidelity ({b_net:+.3f})."
+            elif clip_rank_b < clip_rank_a and b_net >= -0.02:
                 preferred = "B"
                 confidence = 0.75
                 reason = f"Challenger B has superior original CLIP coarse priority (rank {clip_rank_b+1} vs {clip_rank_a+1}) with comparable edit fidelity ({b_net:+.3f})."
             else:
-                # Dead heat: use original CLIP coarse rank to break tie
-                if clip_rank_b < clip_rank_a:
+                # Dead heat: break tie using semantic relevance first, then CLIP priority
+                if rel_b > rel_a:
+                    preferred = "B"
+                    confidence = 0.70
+                    reason = f"Dead heat resolved by standalone LLaVA relevance: B ({rel_b:.3f}) beats A ({rel_a:.3f})."
+                elif clip_rank_b < clip_rank_a:
                     preferred = "B"
                     confidence = 0.70
                     reason = f"Dead heat tie-break resolved by original CLIP priority: B (rank {clip_rank_b+1}) beats A (rank {clip_rank_a+1})."
@@ -984,8 +1002,8 @@ class ReAgentV:
                 effective_alpha = 0.60
                 print(f"[ReAgentV Dynamic Alpha] Score variance={score_var:.5f} < 0.01 -> alpha_eff=0.60 (relying on CLIP)")
             else:
-                effective_alpha = 0.35
-                print(f"[ReAgentV Dynamic Alpha] Score variance={score_var:.5f} >= 0.01 -> alpha_eff=0.35 (relying on discriminative LLaVA)")
+                effective_alpha = 0.45
+                print(f"[ReAgentV Dynamic Alpha] Score variance={score_var:.5f} >= 0.01 -> alpha_eff=0.45 (balanced visual-semantic)")
 
         # ── Pointwise Linear Hybrid Scoring with Normalized CLIP & Safety Net ──
         reranked = []
@@ -1048,6 +1066,8 @@ class ReAgentV:
                     query_image, query_text, c1_path, c2_path, tensor_cache=tensor_cache,
                     clip_rank_a=clip_rank_map.get(c1_path, 99),
                     clip_rank_b=clip_rank_map.get(c2_path, 99),
+                    rel_a=rel_1,
+                    rel_b=rel_2,
                 )
 
                 if winner == "B":
@@ -1225,6 +1245,17 @@ class ReAgentV:
             )
 
             candidate_paths = [r[0] for r in reranked]
+
+            # Module 3 Safe Blacklist Guard:
+            # Protect candidates confirmed as MATCH (rel >= 0.70) or belonging to original CLIP Top-3
+            safe_candidates = {
+                p for p, (rel, v) in _score_cache.items()
+                if v == "MATCH" or rel >= 0.70
+            }
+            if coarse_results:
+                for cr in coarse_results[:3]:
+                    safe_candidates.add(cr[0])
+
             memory.record_step(
                 iteration=iteration,
                 tools_used=tools_used,
@@ -1232,6 +1263,7 @@ class ReAgentV:
                 top_candidates=candidate_paths,
                 critic_raw=critic_raw,
                 scalar_reward=scalar_reward,
+                safe_candidates=safe_candidates,
             )
 
             # Preserve iteration 0 as solid baseline.
