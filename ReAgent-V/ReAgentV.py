@@ -976,21 +976,12 @@ class ReAgentV:
         del q_img_tensor
         torch.cuda.empty_cache()
 
-        # ── Module 2A: Dynamic Hybrid Alpha with Variance Guard (Fix 4: adjusted thresholds) ──
-        valid_llava_scores = [item["rel_score"] for item in evaluated_candidates if item["verdict"] != "NO_MATCH"]
-        if len(valid_llava_scores) < 2:
-            effective_alpha = hybrid_alpha
-            print(f"[ReAgentV Dynamic Alpha] Insufficient valid candidates ({len(valid_llava_scores)} < 2) -> alpha_eff={effective_alpha:.2f} (baseline fallback)")
-        else:
-            score_var = float(np.var(valid_llava_scores))
-            if score_var < 0.01:
-                effective_alpha = 0.60
-                print(f"[ReAgentV Dynamic Alpha] Score variance={score_var:.5f} < 0.01 -> alpha_eff=0.60 (relying on CLIP)")
-            else:
-                effective_alpha = 0.45
-                print(f"[ReAgentV Dynamic Alpha] Score variance={score_var:.5f} >= 0.01 -> alpha_eff=0.45 (balanced visual-semantic)")
+        # ── Module 2A: Direct Hybrid Weighting respecting hybrid_alpha ──
+        # Directly respect user-configured hybrid_alpha (default 0.35 = 65% LLaVA verifier, 35% CLIP visual)
+        # without overriding to alpha_eff=0.60, empowering LLaVA's multi-aspect action/edit verification
+        effective_alpha = hybrid_alpha
 
-        # ── Pointwise Linear Hybrid Scoring with Normalized CLIP & Safety Net ──
+        # ── Pointwise Linear Hybrid Scoring with Normalized CLIP ──
         reranked = []
         clip_rank_map = {vpath: rank for rank, (vpath, _) in enumerate(candidate_list)}
 
@@ -1008,16 +999,6 @@ class ReAgentV:
             if item["verdict"] == "NO_MATCH":
                 linear_hybrid *= 0.1
 
-            # CLIP Safety Net Prior Protection for CLIP Top-3 candidates (when not NO_MATCH)
-            original_clip_rank = clip_rank_map.get(path, 99)
-            if item["verdict"] != "NO_MATCH":
-                if original_clip_rank == 0:
-                    linear_hybrid += 0.06  # CLIP Rank 1 Prior Protection
-                    print(f"[CLIP Safety Net] Applied Rank 1 Prior Protection (+0.06): {os.path.basename(path)}")
-                elif original_clip_rank in [1, 2]:
-                    linear_hybrid += 0.03  # CLIP Top-3 Prior Protection
-                    print(f"[CLIP Safety Net] Applied Rank {original_clip_rank+1} Prior Protection (+0.03): {os.path.basename(path)}")
-
             reranked.append((path, round(linear_hybrid, 4), item["verdict"]))
 
         # Sort by final hybrid score descending
@@ -1034,8 +1015,8 @@ class ReAgentV:
 
             # Trigger tournament when Top-1 and Top-2 are in genuine competition (close call):
             trigger_tournament = (
-                (score_margin <= 0.06 and rel_1 >= 0.65 and rel_2 >= 0.65) or
-                (verdict_1 == "MATCH" and verdict_2 == "MATCH" and score_margin <= 0.08)
+                (score_margin <= 0.05 and rel_1 >= 0.65 and rel_2 >= 0.65) or
+                (verdict_1 == "MATCH" and verdict_2 == "MATCH" and score_margin <= 0.06)
             )
 
 
@@ -1112,10 +1093,10 @@ class ReAgentV:
         corpus_embeddings: torch.Tensor,
         corpus_paths: List[str],
         top_k: int = 5,
-        top_n_coarse: int = 10,
+        top_n_coarse: int = 15,
         max_iterations: int = 2,
-        reward_threshold: float = 0.95,
-        hybrid_alpha: float = 0.55,
+        reward_threshold: float = 0.88,
+        hybrid_alpha: float = 0.35,
         use_reasoning: bool = True,
         candidate_pool_size: int = 50,
         enable_tournament: bool = True,
@@ -1249,11 +1230,12 @@ class ReAgentV:
             )
 
             # Preserve iteration 0 as solid baseline.
-            # Only supersede if a retry iteration genuinely achieves a high reward (>= reward_threshold).
+            # Only supersede if iteration 0 was poor (reward < 0.80)
+            # or if retry iteration achieves a decisive high score (>= 0.95).
             if not best_results:
                 best_results = reranked
                 best_reward = scalar_reward
-            elif scalar_reward > best_reward and scalar_reward >= reward_threshold:
+            elif (best_reward < 0.80 and scalar_reward > best_reward and scalar_reward >= reward_threshold) or (scalar_reward >= 0.95 and scalar_reward > best_reward):
                 best_results = reranked
                 best_reward = scalar_reward
                 print(f"[ReAgentV] Improved results in iteration {iteration + 1} with reward {scalar_reward:.3f}")
