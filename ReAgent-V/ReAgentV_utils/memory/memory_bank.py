@@ -79,12 +79,14 @@ class ToolMemoryBank:
     # Core loop control
     # ------------------------------------------------------------------
 
-    def should_continue(self, scalar_reward: float, iteration: int) -> bool:
+    def should_continue(self, scalar_reward: float, iteration: int, can_early_stop: Optional[bool] = None) -> bool:
         """Return True if the loop should attempt another iteration."""
-        if scalar_reward >= self.reward_threshold:
-            return False  # Good enough → stop
         if iteration + 1 >= self.max_iterations:
             return False  # Reached max budget → stop
+        if can_early_stop is not None:
+            return not can_early_stop
+        if scalar_reward >= self.reward_threshold:
+            return False  # Good enough → stop
         return True
 
     # ------------------------------------------------------------------

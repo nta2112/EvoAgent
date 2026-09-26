@@ -340,6 +340,23 @@ class ReAgentV:
             # Parse JSON
             try:
                 data = json.loads(cleaned)
+                # 1. Prioritize coherent narrative
+                narrative = data.get("target_video_narrative", "").strip()
+                if narrative:
+                    print(f"[ReAgentV Reason] Target simulation narrative: '{narrative}'")
+                    return narrative
+
+                # 2. Assemble from structured slots
+                subj = data.get("target_subject", "").strip()
+                act = data.get("target_action", "").strip()
+                scene = data.get("preserved_scene", "").strip()
+                slot_parts = [p for p in [subj, act, scene] if p]
+                if slot_parts:
+                    assembled = " ".join(slot_parts)
+                    print(f"[ReAgentV Reason] Target simulation (assembled slots): '{assembled}'")
+                    return assembled
+
+                # 3. Fallback to keywords or description
                 if "target_video_keywords" in data:
                     keywords = data["target_video_keywords"]
                     if isinstance(keywords, list):
@@ -347,16 +364,23 @@ class ReAgentV:
                     else:
                         target_desc = str(keywords)
                     if target_desc:
-                        print(f"[ReAgentV Reason] Target simulation: '{target_desc}'")
+                        print(f"[ReAgentV Reason] Target simulation (keywords): '{target_desc}'")
                         return target_desc
+
                 target_desc = data.get("target_video_description", "").strip()
                 if target_desc:
                     print(f"[ReAgentV Reason] Target simulation: '{target_desc}'")
                     return target_desc
             except json.JSONDecodeError:
-                # Regex fallback
+                # Regex fallback for narrative or slots
                 import re
-                m = re.search(r'"?target_video_description"?\s*:\s*"([^"]+)"', cleaned, re.IGNORECASE)
+                m_nar = re.search(r'"?target_video_narrative"?\s*:\s*"([^"]+)"', cleaned, re.IGNORECASE)
+                if m_nar:
+                    target_desc = m_nar.group(1).strip()
+                    print(f"[ReAgentV Reason] Target simulation narrative (Regex): '{target_desc}'")
+                    return target_desc
+
+                m = re.search(r'"?(?:target_video_description|required_transformation)"?\s*:\s*"([^"]+)"', cleaned, re.IGNORECASE)
                 if m:
                     target_desc = m.group(1).strip()
                     print(f"[ReAgentV Reason] Target simulation (Regex): '{target_desc}'")
@@ -1317,7 +1341,7 @@ class ReAgentV:
                 print(f"[ReAgentV] Stagnation detected (reward {scalar_reward:.3f} <= baseline {best_reward:.3f}) — stopping early to save compute.")
                 break
 
-            if not memory.should_continue(scalar_reward, iteration):
+            if not memory.should_continue(scalar_reward, iteration, can_early_stop=can_early_stop):
                 print(f"[ReAgentV] Stopping: max iterations reached.")
                 break
 

@@ -56,6 +56,7 @@ Compare Frame 1 (before) with Frames 2-5 (after). Ask yourself:
    - 0.400 - 0.790: Static or jerky frames.
 
 [Verdict Rules]
+- NEGATIVE ENTITY PENALTY: If the edit replaces or removes an entity (e.g., "replace cow with goat", "remove car", "turn man into woman"), Frames 2-5 MUST NOT show the removed entity. If the candidate video STILL features the removed entity, or completely fails to show the requested new entity, it is an unmodified false positive -> force s_edit <= 0.150 and verdict "NO_MATCH".
 - If s_edit < 0.350: verdict is "NO_MATCH" (unrelated action or unmodified false positive).
 - If s_edit >= 0.350: compute relevance_score = 0.70 * s_edit + 0.20 * s_preservation + 0.10 * s_temporal.
   - If relevance_score >= 0.75, verdict is "MATCH".
@@ -176,19 +177,21 @@ You are given a Reference Image (showing the starting scene/context) and an Edit
 {edit_prompt}
 
 [Goal]
-Identify the essential visual keywords required in the TARGET VIDEO after applying the Edit Instruction.
+Synthesize the Reference Image and Edit Instruction to describe what the TARGET VIDEO looks like.
 Follow these rules strictly:
-1. Synthesize the context from the Reference Image with the changes in the Edit Instruction.
-2. Focus ONLY on the essential subject, action, or state change. Do NOT invent or hallucinate specific background details, environments (e.g., "black background", "clear sky"), or unrequested accessories.
-3. Extract 3 to 5 core keywords that capture the final state.
-4. Crucial: Do NOT include things that were removed, replaced, or absent after the change.
+1. Identify the new or modified main subject (target_subject).
+2. Identify the specific action, movement, or state change required (target_action).
+3. Identify the scene context or background preserved from the Reference Image (preserved_scene).
+4. Combine them into a concise, natural description (target_video_narrative, max 15 words) for video search.
+5. Crucial: Do NOT include things that were removed, replaced, or absent after the change.
 
 [Output Format]
-Output ONLY a concise JSON object with the following fields:
+Output ONLY a concise JSON object:
 {{
-  "initial_scene_analysis": "<brief description of the starting core subject>",
-  "required_transformation": "<the exact change, action, or new attribute required>",
-  "target_video_keywords": ["<keyword 1>", "<keyword 2>", "<keyword 3>"]
+  "target_subject": "<the new or transformed main subject>",
+  "target_action": "<the specific action or dynamic state>",
+  "preserved_scene": "<background or context preserved from Reference Image>",
+  "target_video_narrative": "<a coherent, natural 10-15 word description: [target_subject] [target_action] in [preserved_scene]>"
 }}
 """
 
