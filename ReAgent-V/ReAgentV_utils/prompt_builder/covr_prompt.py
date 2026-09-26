@@ -135,6 +135,28 @@ Return ONLY a single descriptive query string for the TARGET video, maximum 20 w
 Example: "replace cow with goat" → "a goat standing in a green pasture, livestock grazing on farm, animal"
 """
 
+# Feedback-Guided Query Refinement Prompt (VRAgent-inspired Negative Guidance)
+# Uses diagnostic feedback from previous iteration's rejection to avoid repeating errors.
+covr_feedback_refinement_template = """
+[Task]
+You are an expert Video Retrieval Refinement Agent.
+The previous retrieval attempt failed because the retrieved video did not correctly match the requested edit.
+Generate an improved, highly specific search query for the TARGET video.
+
+[Context]
+- Original Edit Instruction: {edit_prompt}
+- Previous Candidate Failed Reason / Diagnostic: {failure_feedback}
+
+[Refinement Rules]
+1. Explicitly focus on the missing action, object, or state that caused the failure.
+2. If the previous video had a wrong action or static posture, emphasize dynamic action keywords.
+3. Exclude attributes or distracting elements from the rejected candidate.
+4. Keep the description compact, concrete, and visually searchable (maximum 20 words).
+
+[Output Format]
+Return ONLY the refined descriptive query string for the TARGET video.
+"""
+
 
 # ---------------------------------------------------------------------------
 # CoVR Reason-then-Retrieve Target Video Simulation Prompt

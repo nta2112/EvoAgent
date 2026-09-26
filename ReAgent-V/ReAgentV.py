@@ -29,6 +29,7 @@ from ReAgentV_utils.prompt_builder.covr_prompt import (
     covr_rerank_prompt_template,
     covr_critic_prompt_template,
     covr_query_expansion_template,
+    covr_feedback_refinement_template,
     covr_reason_target_prompt_template,
     covr_pairwise_tournament_template,
 )
@@ -1153,6 +1154,7 @@ class ReAgentV:
 
         best_results = []
         best_reward = -1.0
+        best_top1_score = -1.0
 
         for iteration in range(max_iterations):
             print(f"\n[ReAgentV] === Iteration {iteration + 1}/{max_iterations} ===")
@@ -1164,23 +1166,31 @@ class ReAgentV:
             hint           = strategy["query_expansion_hint"]
             force_ocr      = strategy["force_ocr"]
             force_det      = strategy["force_det"]
+            failure_feedback = strategy.get("failure_feedback", "")
+            current_hybrid_alpha = strategy.get("suggested_hybrid_alpha", hybrid_alpha)
 
-            # In retry iterations, optionally generate visual detail hints
+            # In retry iterations: Feedback-Guided Query Refinement (Explicit Negative Guidance)
             expanded_text = query_text
             if iteration > 0:
                 try:
-                    expansion_prompt = covr_query_expansion_template.format(
-                        edit_prompt=query_text
-                    )
+                    if failure_feedback:
+                        expansion_prompt = covr_feedback_refinement_template.format(
+                            edit_prompt=query_text,
+                            failure_feedback=failure_feedback[:150],
+                        )
+                    else:
+                        expansion_prompt = covr_query_expansion_template.format(
+                            edit_prompt=query_text
+                        )
                     raw_hint = llava_inference(expansion_prompt, None, max_new_tokens=64).strip()
                     if "assistant\n" in raw_hint:
                         raw_hint = raw_hint.split("assistant\n")[-1].strip()
                     hint_clean = raw_hint.replace("\n", " ").strip().strip('"\'')
                     if hint_clean:
                         hint = hint_clean[:100].strip()
-                        print(f"[ReAgentV] Query expansion hint: '{hint}'")
+                        print(f"[ReAgentV] Query refinement hint (feedback-guided): '{hint}'")
                 except Exception as e:
-                    print(f"[ReAgentV] Query expansion fallback: {e}")
+                    print(f"[ReAgentV] Query refinement fallback: {e}")
 
             tools_used = ["CLIP_coarse"]
             if use_reasoning:
@@ -1207,7 +1217,7 @@ class ReAgentV:
             # Stage 2: Agentic Reranker (with RRF + Pairwise Tournament + score cache)
             reranked = self.agentic_rerank(
                 query_image, query_text, coarse_results,
-                top_k=top_k, hybrid_alpha=hybrid_alpha,
+                top_k=top_k, hybrid_alpha=current_hybrid_alpha,
                 score_cache=_score_cache,
                 tensor_cache=_tensor_cache,
                 enable_tournament=enable_tournament,
@@ -1249,20 +1259,52 @@ class ReAgentV:
                 safe_candidates=safe_candidates,
             )
 
-            # Preserve iteration 0 as solid baseline.
-            # Only supersede if a retry iteration genuinely achieves a high reward (>= reward_threshold).
+            # ── Hướng 2: Bỏ rào cản cứng vô lý, cho phép Vòng 2 cập nhật kết quả hợp lý ──
+            curr_top1_score = reranked[0][1] if reranked else 0.0
             if not best_results:
                 best_results = reranked
                 best_reward = scalar_reward
-            elif scalar_reward > best_reward and scalar_reward >= reward_threshold:
-                best_results = reranked
-                best_reward = scalar_reward
-                print(f"[ReAgentV] Improved results in iteration {iteration + 1} with reward {scalar_reward:.3f}")
+                best_top1_score = curr_top1_score
+            else:
+                is_improved = False
+                update_reason = ""
+                if best_reward < 0.60 and scalar_reward >= 0.60:
+                    is_improved = True
+                    update_reason = f"Rescued low-confidence baseline (reward {best_reward:.3f} -> {scalar_reward:.3f})"
+                elif scalar_reward > best_reward + 0.02:
+                    is_improved = True
+                    update_reason = f"Higher critic reward ({scalar_reward:.3f} > {best_reward:.3f})"
+                elif abs(scalar_reward - best_reward) <= 0.05 and curr_top1_score > best_top1_score + 0.02:
+                    is_improved = True
+                    update_reason = f"Superior ranking confidence ({curr_top1_score:.3f} > {best_top1_score:.3f})"
 
-            # Early stopping strictly when true reward_threshold is met
-            if scalar_reward >= reward_threshold:
-                print(f"[ReAgentV] High confidence hit (reward={scalar_reward:.3f} >= threshold={reward_threshold}) — stopping early.")
+                if is_improved:
+                    best_results = reranked
+                    best_reward = scalar_reward
+                    best_top1_score = curr_top1_score
+                    print(f"[ReAgentV] Updated best results in iteration {iteration + 1}: {update_reason}")
+                else:
+                    print(f"[ReAgentV] Retained prior best results (reward={best_reward:.3f}, score={best_top1_score:.3f}) over iter {iteration + 1} (reward={scalar_reward:.3f}, score={curr_top1_score:.3f})")
+
+            # ── Hướng 1: Calibrated Early Stopping (Không dừng sớm mù quáng) ──
+            # Only stop early if:
+            # 1. Critic gives high reward (>= reward_threshold)
+            # 2. Top-1 candidate has genuine visual verification (s_edit >= 0.65 from score_cache)
+            # 3. Confidence margin between Top-1 and Top-2 is decisive (>= 0.07), avoiding tie-break ambiguities
+            top1_rel = _score_cache.get(top1_path, (0.0, ""))[0]
+            score_margin = (reranked[0][1] - reranked[1][1]) if len(reranked) >= 2 else 1.0
+
+            can_early_stop = (
+                scalar_reward >= reward_threshold and
+                top1_rel >= 0.65 and
+                score_margin >= 0.07
+            )
+
+            if can_early_stop:
+                print(f"[ReAgentV] High confidence hit (reward={scalar_reward:.3f} >= {reward_threshold}, rel={top1_rel:.2f}, margin={score_margin:.3f}) — stopping early.")
                 break
+            elif scalar_reward >= reward_threshold:
+                print(f"[ReAgentV] Critic reward high ({scalar_reward:.3f}) but top candidates in close competition (margin={score_margin:.3f} < 0.07, rel={top1_rel:.2f}) — continuing refinement to resolve ambiguity.")
 
             # Identical ranking early exit: if retry iteration yields the exact same Top-3 candidates,
             # further iterations will just produce duplicate cache hits without improving accuracy
