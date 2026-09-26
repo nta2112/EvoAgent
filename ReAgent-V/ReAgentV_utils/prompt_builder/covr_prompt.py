@@ -63,9 +63,8 @@ Compare Frame 1 (before) with Frames 2-5 (after). Ask yourself:
 
 
 [Output Format]
-Output ONLY a JSON object:
+Output ONLY a compact JSON object with numerical scores first. No conversational filler or markdown explanation:
 {{
-  "visual_analysis": "<1-2 sentences: what Frame 1 shows, what Frames 2-5 actually show, and whether the specific edit is visually present>",
   "s_edit": <float 0.000 to 1.000>,
   "s_preservation": <float 0.000 to 1.000>,
   "s_temporal": <float 0.000 to 1.000>,

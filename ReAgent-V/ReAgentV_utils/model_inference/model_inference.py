@@ -31,23 +31,24 @@ def llava_inference(qs, video, max_new_tokens: int = 64):
     input_ids = tokenizer_image_token(prompt_question, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).to(target_device)
     attention_mask = torch.ones_like(input_ids, device=target_device)
 
-    if video is not None:
-        cont = model.generate(
-            input_ids,
-            attention_mask=attention_mask,
-            images=video,
-            modalities=["video"],
-            do_sample=False,
-            max_new_tokens=max_new_tokens,
-            num_beams=1
-        )
-    else:
-        cont = model.generate(
-            input_ids,
-            attention_mask=attention_mask,
-            do_sample=False,
-            max_new_tokens=max_new_tokens,
-        )
+    with torch.inference_mode():
+        if video is not None:
+            cont = model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                images=video,
+                modalities=["video"],
+                do_sample=False,
+                max_new_tokens=max_new_tokens,
+                num_beams=1
+            )
+        else:
+            cont = model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                do_sample=False,
+                max_new_tokens=max_new_tokens,
+            )
 
     text_outputs = tokenizer.batch_decode(cont, skip_special_tokens=True)[0].strip()
     return text_outputs
