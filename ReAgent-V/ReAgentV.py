@@ -420,11 +420,13 @@ class ReAgentV:
         except Exception:
             clip_device = torch.device("cuda:0")
 
-        # Select text to encode: prioritized reasoned_description if available
-        if reasoned_description:
-            active_text = reasoned_description.strip()
+        # Anchor Composition: NEVER discard the ground-truth edit instruction!
+        # Always anchor with query_text at position 0, followed by the simulated narrative details.
+        q_clean = query_text.strip()
+        if reasoned_description and reasoned_description.strip().lower() != q_clean.lower():
+            active_text = f"{q_clean}, showing {reasoned_description.strip()}"
         else:
-            active_text = query_text.strip()
+            active_text = q_clean
 
         # Format text with context prefix to align with target video representations
         if not active_text.lower().startswith("a video of") and not active_text.lower().startswith("a video showing"):
@@ -524,12 +526,16 @@ class ReAgentV:
         # Fast GPU/CPU cosine similarity against entire corpus [N]
         sims_composed = (corpus_embeddings.to(dtype=torch.float32) @ query_feat.T).squeeze(-1)  # [N]
 
-        # VRAgent-inspired Target Scene Alignment:
-        # If reasoned_description is present, also compute direct text-to-video alignment
-        # to ensure new target entities (goats, horses, Mars) strongly lead candidate selection.
+        # Target Scene Alignment with Ground-Truth Anchor:
+        # If reasoned_description is present, anchor target_text with query_text + target simulation
+        # so ground-truth user intent is never overridden by narrative hallucination.
         if reasoned_description:
             with torch.no_grad():
-                target_text = f"a video showing {reasoned_description.strip()}"
+                q_clean = query_text.strip()
+                if reasoned_description.strip().lower() != q_clean.lower():
+                    target_text = f"a video of {q_clean}, showing {reasoned_description.strip()}"
+                else:
+                    target_text = f"a video showing {q_clean}"
                 target_inputs = self.clip_processor(
                     text=[target_text], return_tensors="pt",
                     padding=True, truncation=True, max_length=77,

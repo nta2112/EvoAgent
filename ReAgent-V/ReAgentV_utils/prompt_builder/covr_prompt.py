@@ -178,19 +178,23 @@ You are given a Reference Image (showing the starting scene/context) and an Edit
 
 [Goal]
 Synthesize the Reference Image and Edit Instruction to describe what the TARGET VIDEO looks like.
-Follow these rules strictly:
-1. Identify the new or modified main subject (target_subject).
-2. Identify the specific action, movement, or state change required (target_action).
-3. Identify the scene context or background preserved from the Reference Image (preserved_scene).
-4. Combine them into a concise, natural description (target_video_narrative, max 15 words) for video search.
-5. Crucial: Do NOT include things that were removed, replaced, or absent after the change.
+
+[Strict Anti-Hallucination Rules]
+1. FAITHFUL TO EDIT: You must strictly adhere to the exact words, attributes, and colors in the Edit Instruction.
+2. NO INVENTED ATTRIBUTES: DO NOT guess, assume, or invent specific colors, species, breeds, or objects that are NOT explicitly stated in the Edit Instruction.
+   - Example: If edit is "in yellow", the target color MUST be yellow. NEVER invent other colors like "white".
+   - Example: If edit is "Change the ribbon color", describe "a ribbon of a different color", NEVER guess a specific unrequested color like "blue".
+   - Example: If edit is "replace cow with goat", describe "a goat in the field", do NOT invent extra animals.
+3. CONTEXT PRESERVATION: Preserve only the background or scene context from the Reference Image that was NOT modified by the edit.
+4. DO NOT include entities or attributes that were removed or replaced by the edit.
+5. CONCISE NARRATIVE: target_video_narrative must be a compact, natural sentence (maximum 15 words) focusing directly on the requested edit.
 
 [Output Format]
 Output ONLY a concise JSON object:
 {{
-  "target_subject": "<the new or transformed main subject>",
+  "target_subject": "<the new or transformed main subject strictly following the edit>",
   "target_action": "<the specific action or dynamic state>",
-  "preserved_scene": "<background or context preserved from Reference Image>",
+  "preserved_scene": "<background context preserved from Reference Image>",
   "target_video_narrative": "<a coherent, natural 10-15 word description: [target_subject] [target_action] in [preserved_scene]>"
 }}
 """
