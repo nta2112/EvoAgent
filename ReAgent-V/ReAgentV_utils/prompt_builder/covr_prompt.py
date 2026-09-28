@@ -223,13 +223,14 @@ You are provided a sequence of 3 frames:
 [Comparison Criteria]
 1. EDIT EXECUTION (s_edit_a, s_edit_b on scale 0.000 to 1.000):
    - Which video more clearly, accurately, and prominently executes the requested change?
+   - STRICT DIFFERENTIATION: Do NOT output identical s_edit scores unless both candidates are identical. Assign a higher s_edit (margin >= 0.05) to the candidate that demonstrates the transformation more distinctly.
 2. CONTEXT PRESERVATION (s_preservation_a, s_preservation_b on scale 0.000 to 1.000):
    - Which video better preserves the background, environment, and unmodified elements from Frame 1?
    - If a video indiscriminately alters the entire scene or replaces unrequested objects, it fails context preservation.
-3. FAIR DECISION:
-   - Choose "A" if Video A is overall better.
-   - Choose "B" if Video B is overall better.
-   - Rate s_edit and s_preservation objectively for both candidates.
+3. DECISIVE CHOICE:
+   - Choose "A" if Video A is superior.
+   - Choose "B" if Video B is superior.
+   - Avoid passive ties: carefully scrutinize subtle differences in action, objects, and attributes.
 
 [Output Format]
 Output ONLY a concise JSON object:
