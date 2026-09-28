@@ -66,7 +66,7 @@ class ToolMemoryBank:
     def __init__(
         self,
         max_iterations: int = 3,
-        reward_threshold: float = 0.85,
+        reward_threshold: float = 0.75,
         initial_alpha: float = 0.5,
     ):
         self.max_iterations   = max_iterations

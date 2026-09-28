@@ -796,14 +796,19 @@ class ReAgentV:
                 reason = f"Consistent preference for Candidate A across both orientations ({reason_1})"
         else:
             # Position variance / Split decision / Dead heat:
-            # Candidate A is the reigning Incumbent (Top-1).
-            # To protect Ground Truth from being dethroned by noisy pointwise LLaVA scores or minor variances,
-            # Challenger B must demonstrate a decisive net advantage (b_net >= 0.05) or prior coarse priority.
-            if b_net >= 0.05 and pres_diff >= -0.04:
+            # Candidate A was incumbent, but Challenger B is competing closely.
+            # 1. Clear net edit fidelity advantage (>= 0.02) without context collapse
+            if b_net >= 0.02 and pres_diff >= -0.05:
                 preferred = "B"
                 confidence = max(conf_1, conf_2)
-                reason = f"Challenger B demonstrated clear net edit fidelity advantage ({b_net:+.3f}) despite position variance."
-            elif clip_rank_b < clip_rank_a and b_net >= 0.02 and pres_diff >= -0.04:
+                reason = f"Challenger B demonstrated net edit fidelity advantage ({b_net:+.3f}) despite position variance."
+            # 2. Pure transformation fidelity advantage (Challenger B executes edit more distinctly)
+            elif edit_diff >= 0.02 and pres_diff >= -0.05:
+                preferred = "B"
+                confidence = max(conf_1, conf_2)
+                reason = f"Challenger B demonstrated higher transformation fidelity ({avg_edit_b:.2f} vs {avg_edit_a:.2f})."
+            # 3. Challenger B has coarse priority and no negative edit deficit
+            elif clip_rank_b < clip_rank_a and b_net >= 0.0:
                 preferred = "B"
                 confidence = 0.75
                 reason = f"Challenger B has superior original CLIP coarse priority (rank {clip_rank_b+1} vs {clip_rank_a+1}) and net advantage ({b_net:+.3f})."
@@ -1040,16 +1045,8 @@ class ReAgentV:
             if item["verdict"] == "NO_MATCH":
                 linear_hybrid *= 0.1
 
-            # CLIP Safety Net Prior Protection for CLIP Top-3 candidates (when not NO_MATCH)
-            original_clip_rank = clip_rank_map.get(path, 99)
-            if item["verdict"] != "NO_MATCH":
-                if original_clip_rank == 0:
-                    linear_hybrid += 0.06  # CLIP Rank 1 Prior Protection
-                    print(f"[CLIP Safety Net] Applied Rank 1 Prior Protection (+0.06): {os.path.basename(path)}")
-                elif original_clip_rank in [1, 2]:
-                    linear_hybrid += 0.03  # CLIP Top-3 Prior Protection
-                    print(f"[CLIP Safety Net] Applied Rank {original_clip_rank+1} Prior Protection (+0.03): {os.path.basename(path)}")
-
+            # Clean linear hybrid scoring: No artificial CLIP distractor bonus.
+            # Both candidates are evaluated fairly on actual visual edit adherence and CLIP similarity.
             reranked.append((path, round(linear_hybrid, 4), item["verdict"]))
 
         # Sort by final hybrid score descending
@@ -1146,7 +1143,7 @@ class ReAgentV:
         top_k: int = 5,
         top_n_coarse: int = 10,
         max_iterations: int = 2,
-        reward_threshold: float = 0.95,
+        reward_threshold: float = 0.75,
         hybrid_alpha: float = 0.55,
         use_reasoning: bool = True,
         candidate_pool_size: int = 50,
@@ -1318,23 +1315,24 @@ class ReAgentV:
 
             # ── Hướng 1: Calibrated Early Stopping (Không dừng sớm mù quáng) ──
             # Only stop early if:
-            # 1. Critic gives high reward (>= reward_threshold)
-            # 2. Top-1 candidate has genuine visual verification (s_edit >= 0.65 from score_cache)
-            # 3. Confidence margin between Top-1 and Top-2 is decisive (>= 0.07), avoiding tie-break ambiguities
+            # 1. High confidence verified MATCH (rel >= 0.85) from Reranker
+            # 2. Strong consensus: both Reranker (rel >= 0.70) and Critic (reward >= 0.60) agree on MATCH
+            # 3. High critic reward (>= reward_threshold) with decent visual alignment (rel >= 0.65)
             top1_rel = _score_cache.get(top1_path, (0.0, ""))[0]
+            top1_verdict = _score_cache.get(top1_path, (0.0, ""))[1]
             score_margin = (reranked[0][1] - reranked[1][1]) if len(reranked) >= 2 else 1.0
 
             can_early_stop = (
-                scalar_reward >= reward_threshold and
-                top1_rel >= 0.65 and
-                score_margin >= 0.07
+                (top1_verdict == "MATCH" and top1_rel >= 0.85) or
+                (top1_verdict == "MATCH" and top1_rel >= 0.70 and scalar_reward >= 0.60) or
+                (scalar_reward >= reward_threshold and top1_rel >= 0.65)
             )
 
             if can_early_stop:
-                print(f"[ReAgentV] High confidence hit (reward={scalar_reward:.3f} >= {reward_threshold}, rel={top1_rel:.2f}, margin={score_margin:.3f}) — stopping early.")
+                print(f"[ReAgentV] Confirmed High-Quality Hit (verdict={top1_verdict}, rel={top1_rel:.3f}, reward={scalar_reward:.3f}, margin={score_margin:.3f}) — stopping early to prevent drift & save compute.")
                 break
-            elif scalar_reward >= reward_threshold:
-                print(f"[ReAgentV] Critic reward high ({scalar_reward:.3f}) but top candidates in close competition (margin={score_margin:.3f} < 0.07, rel={top1_rel:.2f}) — continuing refinement to resolve ambiguity.")
+            else:
+                print(f"[ReAgentV] Ambiguity/Uncertainty detected (verdict={top1_verdict}, rel={top1_rel:.3f}, reward={scalar_reward:.3f}, margin={score_margin:.3f}) — triggering adaptive reflection loop.")
 
             # Identical ranking early exit: if retry iteration yields the exact same Top-3 candidates,
             # further iterations will just produce duplicate cache hits without improving accuracy
