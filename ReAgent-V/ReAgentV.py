@@ -657,16 +657,11 @@ class ReAgentV:
             del q_img_tensor
             return "A", 0.5, "Failed to load candidate video tensors"
 
-        # Extract 2 representative keyframes each (middle progression + final state)
-        n_a = vid_a_tensor[0].shape[0]
-        n_b = vid_b_tensor[0].shape[0]
-        idx_a_mid = max(0, n_a // 2 - 1)
-        idx_a_last = n_a - 1
-        idx_b_mid = max(0, n_b // 2 - 1)
-        idx_b_last = n_b - 1
-
-        frames_a = vid_a_tensor[0][[idx_a_mid, idx_a_last]].to(dev, dtype=torch.float16)
-        frames_b = vid_b_tensor[0][[idx_b_mid, idx_b_last]].to(dev, dtype=torch.float16)
+        # Extract 1 representative keyframe each (the last frame usually shows the completed edit)
+        idx_a = vid_a_tensor[0].shape[0] - 1
+        idx_b = vid_b_tensor[0].shape[0] - 1
+        frame_a = vid_a_tensor[0][idx_a:idx_a+1].to(dev, dtype=torch.float16)
+        frame_b = vid_b_tensor[0][idx_b:idx_b+1].to(dev, dtype=torch.float16)
 
         # --- Symmetric Debiased Tournament with Incumbent Context Shield ---
         prompt = covr_pairwise_tournament_template.format(edit_prompt=query_text)
@@ -686,8 +681,8 @@ class ReAgentV:
             except Exception:
                 return None
 
-        # Forward pass 1: Frames 2-3 are Candidate A (Incumbent), Frames 4-5 are Candidate B (Challenger)
-        combined_tensor_ab = torch.cat([q_img_tensor, frames_a, frames_b], dim=0)
+        # Forward pass 1: Frame 2 is Candidate A (Incumbent), Frame 3 is Candidate B (Challenger)
+        combined_tensor_ab = torch.cat([q_img_tensor, frame_a, frame_b], dim=0)
         pref_1, conf_1, reason_1 = "A", 0.5, ""
         s_edit_a_1, s_edit_b_1 = 0.5, 0.5
         s_pres_a_1, s_pres_b_1 = 0.5, 0.5
@@ -698,7 +693,7 @@ class ReAgentV:
             if data_1 and isinstance(data_1, dict):
                 pref_1 = str(data_1.get("preferred", "A")).strip().upper()
                 conf_1 = float(data_1.get("confidence", 0.5))
-                reason_1 = str(data_1.get("comparative_analysis", data_1.get("reason", "")))
+                reason_1 = str(data_1.get("reason", ""))
                 s_edit_a_1 = float(data_1.get("s_edit_a", 0.5))
                 s_edit_b_1 = float(data_1.get("s_edit_b", 0.5))
                 s_pres_a_1 = float(data_1.get("s_preservation_a", 0.5))
@@ -721,8 +716,8 @@ class ReAgentV:
             reason_1 = "Parsed via fallback regex"
         del combined_tensor_ab
 
-        # Forward pass 2: Inverted order (Frames 2-3 are Candidate B, Frames 4-5 are Candidate A)
-        combined_tensor_ba = torch.cat([q_img_tensor, frames_b, frames_a], dim=0)
+        # Forward pass 2: Inverted order (B as Video A in prompt, A as Video B in prompt)
+        combined_tensor_ba = torch.cat([q_img_tensor, frame_b, frame_a], dim=0)
         pref_2, conf_2, reason_2 = "B", 0.5, ""
         s_edit_a_2, s_edit_b_2 = 0.5, 0.5
         s_pres_a_2, s_pres_b_2 = 0.5, 0.5
@@ -735,7 +730,7 @@ class ReAgentV:
                 raw_pref_2 = str(data_2.get("preferred", "A")).strip().upper()
                 pref_2 = "B" if raw_pref_2 == "A" else "A"
                 conf_2 = float(data_2.get("confidence", 0.5))
-                reason_2 = str(data_2.get("comparative_analysis", data_2.get("reason", "")))
+                reason_2 = str(data_2.get("reason", ""))
                 s_edit_b_2 = float(data_2.get("s_edit_a", 0.5))
                 s_edit_a_2 = float(data_2.get("s_edit_b", 0.5))
                 s_pres_b_2 = float(data_2.get("s_preservation_a", 0.5))
@@ -757,7 +752,7 @@ class ReAgentV:
             s_pres_b_2 = float(m_pa.group(1)) if m_pa else 0.5
             s_pres_a_2 = float(m_pb.group(1)) if m_pb else 0.5
             reason_2 = "Parsed via fallback regex"
-        del combined_tensor_ba, frames_a, frames_b, q_img_tensor
+        del combined_tensor_ba, q_img_tensor
         torch.cuda.empty_cache()
 
         # Compute multi-aspect averages across both orientations:
@@ -800,35 +795,39 @@ class ReAgentV:
                 confidence = avg_conf
                 reason = f"Consistent preference for Candidate A across both orientations ({reason_1})"
         else:
-            # Position variance / Split decision (pref_1 != pref_2):
-            # Candidate A was initial top-1 mainly due to CLIP coarse score.
-            # Promote Challenger B ONLY when genuine superiority is demonstrated:
-            # 1. Distinct net edit fidelity advantage (>= 0.02) without context collapse
-            if b_net >= 0.02 and pres_diff >= -0.04:
+            # Position variance / Split decision / Dead heat (pref_1 != pref_2):
+            # Candidate A was initial top-1 mainly due to CLIP coarse score, but Challenger B is competing closely.
+            # 1. Net edit fidelity advantage (>= 0.01) without context collapse
+            if b_net >= 0.01 and pres_diff >= -0.05:
                 preferred = "B"
                 confidence = max(conf_1, conf_2)
                 reason = f"Challenger B demonstrated net edit fidelity advantage ({b_net:+.3f}) despite position variance."
             # 2. Pure transformation fidelity advantage (Challenger B executes edit more distinctly)
-            elif edit_diff >= 0.02 and pres_diff >= -0.04:
+            elif edit_diff >= 0.01 and pres_diff >= -0.05:
                 preferred = "B"
                 confidence = max(conf_1, conf_2)
                 reason = f"Challenger B demonstrated higher transformation fidelity ({avg_edit_b:.2f} vs {avg_edit_a:.2f})."
             # 3. Challenger B has higher pointwise LLaVA score than Candidate A
-            elif rel_b >= rel_a + 0.025 and pres_diff >= -0.04:
+            elif rel_b > rel_a and pres_diff >= -0.04:
                 preferred = "B"
                 confidence = max(conf_1, conf_2)
                 reason = f"Challenger B has superior pointwise edit verification (rel={rel_b:.3f} vs {rel_a:.3f})."
             # 4. Decisive confidence in Challenger orientation
-            elif conf_2 >= conf_1 + 0.10 and pres_diff >= -0.04 and b_net >= 0.0:
+            elif conf_2 > conf_1 + 0.04 and pres_diff >= -0.04:
                 preferred = "B"
                 confidence = conf_2
                 reason = f"Challenger B demonstrated stronger verification confidence ({conf_2:.2f} vs {conf_1:.2f})."
-            # 5. Incumbent retains on parity or ambiguous dead heat:
-            # Candidate A had higher CLIP coarse priority; preserving A prevents demoting genuine GT.
+            # 5. Dead tie (|b_net| <= 0.01): When both are valid matches (rel >= 0.65) and neither degraded context,
+            # promote Challenger B if its pointwise verification matches or exceeds A, breaking CLIP distractor bias.
+            elif abs(b_net) <= 0.01 and rel_b >= rel_a and pres_diff >= -0.04 and rel_b >= 0.65:
+                preferred = "B"
+                confidence = avg_conf
+                reason = f"Challenger B promoted on parity: matched edit verification (rel={rel_b:.2f}) and overcame CLIP reference bias."
+            # 6. Incumbent retains if Challenger failed criteria or showed negative deficit
             else:
                 preferred = "A"
                 confidence = max(conf_1, conf_2)
-                reason = f"Incumbent Shield: Retained Candidate A as Top-1 under split parity (b_net={b_net:+.3f}, ranks {clip_rank_a+1} vs {clip_rank_b+1})."
+                reason = f"Incumbent Shield: Retained Candidate A as Top-1 (b_net={b_net:+.3f}, edit_diff={edit_diff:+.3f}, ranks {clip_rank_a+1} vs {clip_rank_b+1})."
 
         return preferred, confidence, reason
 
@@ -931,7 +930,7 @@ class ReAgentV:
             # Robust JSON extraction with regex guard (User Note 1)
             raw_output = ""
             try:
-                raw_output = llava_inference(prompt, combined_input, max_new_tokens=160)
+                raw_output = llava_inference(prompt, combined_input, max_new_tokens=64)
                 cleaned = _strip_llava_output(raw_output)
 
                 data = None
@@ -952,7 +951,6 @@ class ReAgentV:
                     s_edit = float(data.get("s_edit", -1.0))
                     s_pres = float(data.get("s_preservation", -1.0))
                     s_temp = float(data.get("s_temporal", -1.0))
-                    obs = str(data.get("visual_observation", ""))
 
                     if s_edit >= 0.0 and s_pres >= 0.0 and s_temp >= 0.0:
                         # Fix 2: s_edit-gated scoring:
@@ -972,8 +970,6 @@ class ReAgentV:
                         verdict = str(data.get("verdict", "PARTIAL_MATCH")).strip().upper()
 
                     va = f"s_edit={s_edit:.2f}, s_pres={s_pres:.2f}, s_temp={s_temp:.2f}"
-                    if obs:
-                        va += f" | obs: {obs[:50]}..."
                 else:
                     raise ValueError("JSON parse failed, invoking regex fallback")
             except Exception:
