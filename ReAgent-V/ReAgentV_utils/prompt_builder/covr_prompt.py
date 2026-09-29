@@ -17,10 +17,7 @@ starting from the state shown in the query image.
 
 covr_rerank_prompt_template = """
 [Task]
-You are a strict Video Retrieval Judge. Determine whether a Candidate Video actually demonstrates the requested edit — or whether it merely shows an unrelated scene that happens to look superficially similar.
-
-[Critical Warning]
-Be SKEPTICAL. Most candidates will NOT correctly execute the edit. Only a small fraction of candidates truly match. Do NOT assume success — look for concrete visual evidence that the specific edit was applied.
+You are a strict Video Retrieval Judge. Determine whether a Candidate Video actually demonstrates the requested edit — or whether it merely shows an unrelated scene or an unmodified false positive.
 
 [Visual Input Layout]
 - Frame 1 (first image): The Reference Image — the starting visual state.
@@ -29,43 +26,27 @@ Be SKEPTICAL. Most candidates will NOT correctly execute the edit. Only a small 
 [Edit Instruction]
 {edit_prompt}
 
-[Your Job]
-Compare Frame 1 (before) with Frames 2-5 (after). Ask yourself:
-1. Does the Candidate Video show the SPECIFIC change described in the Edit Instruction? (e.g., if the edit says "add fog", do Frames 2-5 actually show fog? If the edit says "make her angry", does the person actually look angry?)
-2. Is the surrounding context (background, environment, unmodified objects) preserved from Frame 1?
-3. If the video shows a completely different scene, different person, or different object than Frame 1, it is NOT a match — even if the new scene coincidentally contains the target concept.
+[Verification Rules]
+1. VISUAL OBSERVATION: First observe Frames 2-5 carefully. What objects, persons, colors, and actions are actually depicted?
+2. EDIT VERIFICATION: Compare against Frame 1. Does the Candidate Video show the SPECIFIC change described in the Edit Instruction?
+   - If the edit requires an addition or state change (e.g. "make tree lit", "add fog", "have a crowd", "make billboard blank"), is that change unmistakably present in Frames 2-5?
+   - If the edit replaces an entity (e.g. "replace cow with goat", "woman to man"), the original entity must NOT be present and the replacement entity MUST be visible.
+   - If the video shows the same scene from Frame 1 WITHOUT the requested change (e.g. tree still unlit, billboard still has ads, ribbon still original color), it is an UNMODIFIED FALSE POSITIVE -> set s_edit <= 0.200.
 
-[Calibration Examples]
-- Edit: "add fog" → Video shows clear sunny weather, no fog at all → s_edit=0.15 (NO_MATCH)
-- Edit: "add fog" → Video shows a misty, foggy version of the same scene → s_edit=0.95 (MATCH)
-- Edit: "make her angry" → Video shows a different person smiling → s_edit=0.10 (NO_MATCH)
-- Edit: "have a crowd" → Video shows an empty stadium with no people → s_edit=0.10 (NO_MATCH)
-
-[Multi-Aspect Scoring (0.000 to 1.000)]
-1. s_edit (Transformation Fidelity — MOST IMPORTANT):
-   - 0.900 - 1.000: The SPECIFIC edit is clearly and unmistakably visible in Frames 2-5.
-   - 0.600 - 0.890: The edit is partially visible but incomplete or ambiguous.
-   - 0.300 - 0.590: Weak or questionable evidence of the edit. The video might show something vaguely related but not the actual requested change.
-   - 0.000 - 0.290: The edit is NOT executed. The video is unrelated, shows the wrong action, or is an unmodified false positive.
-2. s_preservation (Context Preservation):
-   - 0.800 - 1.000: Background and unmodified elements from Frame 1 are preserved.
-   - 0.400 - 0.790: Different but thematically similar environment.
-   - 0.000 - 0.390: Completely different scene with no connection to Frame 1.
-3. s_temporal (Temporal Consistency):
-   - 0.800 - 1.000: Smooth, coherent motion across Frames 2-5.
-   - 0.400 - 0.790: Static or jerky frames.
-
-[Verdict Rules]
-- NEGATIVE ENTITY PENALTY: If the edit replaces or removes an entity (e.g., "replace cow with goat", "remove car", "turn man into woman"), Frames 2-5 MUST NOT show the removed entity. If the candidate video STILL features the removed entity, or completely fails to show the requested new entity, it is an unmodified false positive -> force s_edit <= 0.150 and verdict "NO_MATCH".
-- If s_edit < 0.350: verdict is "NO_MATCH" (unrelated action or unmodified false positive).
-- If s_edit >= 0.350: compute relevance_score = 0.70 * s_edit + 0.20 * s_preservation + 0.10 * s_temporal.
-  - If relevance_score >= 0.75, verdict is "MATCH".
-  - Otherwise, verdict is "PARTIAL_MATCH".
-
+[Scoring Guide (0.000 to 1.000)]
+- s_edit (Transformation Fidelity):
+  * 0.900 - 1.000: Clear, complete, and prominent execution of the specific edit.
+  * 0.650 - 0.890: Good execution, but transformation is partially visible or subtle.
+  * 0.350 - 0.640: Ambiguous or weak evidence; concept is related but not the exact requested change.
+  * 0.000 - 0.340: Fails the edit: wrong action, unmodified false positive, or unrelated scene.
+- s_preservation: Background, environment, and unmodified elements from Frame 1 are preserved.
+- s_temporal: Motion is natural, smooth, and coherent across Frames 2-5.
 
 [Output Format]
-Output ONLY a compact JSON object with numerical scores first. No conversational filler or markdown explanation:
+Output ONLY a concise JSON object. You MUST provide visual_observation and edit_verification FIRST before numerical scores:
 {{
+  "visual_observation": "<1-2 sentences: what subjects, objects, and actions appear across Frames 2-5>",
+  "edit_verification": "<1-2 sentences: does the video execute the specific edit vs Frame 1, or is it an unmodified distractor?>",
   "s_edit": <float 0.000 to 1.000>,
   "s_preservation": <float 0.000 to 1.000>,
   "s_temporal": <float 0.000 to 1.000>,
@@ -208,40 +189,33 @@ Output ONLY a concise JSON object:
 
 covr_pairwise_tournament_template = """
 [Task]
-You are a Video Retrieval Judge comparing two candidate videos: Video A and Video B.
-Determine which candidate better executes the requested Edit Instruction while preserving the context from the Reference Image (Frame 1).
+You are an expert Video Retrieval Judge comparing two candidate videos: Candidate A and Candidate B.
+Determine which candidate better executes the requested Edit Instruction compared to the Reference Image.
 
 [Visual Inputs]
-You are provided a sequence of 3 frames:
-- Frame 1: Reference Image (initial state).
-- Frame 2: Candidate Video A.
-- Frame 3: Candidate Video B.
+You are provided a sequence of 5 frames:
+- Frame 1: Reference Image (initial visual state).
+- Frames 2 & 3: Candidate Video A (Frame 2: middle progression, Frame 3: ending state).
+- Frames 4 & 5: Candidate Video B (Frame 4: middle progression, Frame 5: ending state).
 
 [Edit Instruction]
 {edit_prompt}
 
 [Comparison Criteria]
-1. EDIT EXECUTION (s_edit_a, s_edit_b on scale 0.000 to 1.000):
-   - Which video more clearly, accurately, and prominently executes the requested change?
-   - STRICT DIFFERENTIATION: Do NOT output identical s_edit scores unless both candidates are identical. Assign a higher s_edit (margin >= 0.05) to the candidate that demonstrates the transformation more distinctly.
-2. CONTEXT PRESERVATION (s_preservation_a, s_preservation_b on scale 0.000 to 1.000):
-   - Which video better preserves the background, environment, and unmodified elements from Frame 1?
-   - If a video indiscriminately alters the entire scene or replaces unrequested objects, it fails context preservation.
-3. DECISIVE CHOICE:
-   - Choose "A" if Video A is superior.
-   - Choose "B" if Video B is superior.
-   - Avoid passive ties: carefully scrutinize subtle differences in action, objects, and attributes.
+1. EDIT EXECUTION: Which candidate more clearly, prominently, and accurately executes the requested transformation?
+2. CONTEXT PRESERVATION: Which candidate better preserves the unmodified background, environment, and context from Frame 1?
+3. COMPARATIVE VERIFICATION: Directly compare Candidate A against Candidate B. Does one candidate clearly show the requested modification while the other is an unmodified distractor, static duplicate, or shows the wrong action?
 
 [Output Format]
-Output ONLY a concise JSON object:
+Output ONLY a concise JSON object. You MUST provide the comparative analysis FIRST before selecting the preferred candidate:
 {{
+  "comparative_analysis": "<2 sentences: directly compare Candidate A (Frames 2-3) and Candidate B (Frames 4-5). Which one exhibits the requested change and what specific visual evidence distinguishes them?>",
   "s_edit_a": <float 0.000 to 1.000>,
   "s_edit_b": <float 0.000 to 1.000>,
   "s_preservation_a": <float 0.000 to 1.000>,
   "s_preservation_b": <float 0.000 to 1.000>,
   "preferred": "<A | B>",
-  "confidence": <float from 0.50 to 1.00>,
-  "reason": "<1-2 sentence objective comparison of edit execution and context preservation between A and B>"
+  "confidence": <float from 0.50 to 1.00>
 }}
 """
 
