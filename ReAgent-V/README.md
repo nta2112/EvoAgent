@@ -51,48 +51,50 @@ Crucially, it unifies **training and inference** via a shared evaluation backbon
 ## 🌐 Project Structure
 
 ```text
-ReAgentV-NeXT/                             # Repository root
+ReAgent-V/                                 # ReAgent-V Core Directory
 ├── ReAgentV.py                           # Core engine: orchestrates multimodal retrieval, prompt synthesis, and QA flow
-├── run_pipeline.py                       # End-to-end demo: shows how to run the complete Video-QA pipeline
+├── run_pipeline.py                       # End-to-end demo: complete Video-QA pipeline
+├── covr_indexer.py                       # Stage 1: 4-frame temporal video corpus indexer (Decord + CLIP)
+├── run_covr_retrieval.py                 # Single-query CoVR retrieval demo (Two-stage + tournament)
+├── eval_covr_benchmark.py                # Full benchmark evaluation script (Recall@K, MRR)
+├── init_modules.py                       # Dynamic module initializer and importer
+├── ReAgentV_config/                      # Centralized configuration folder
+│   └── config.yaml                       # All thresholds, flags, and hyperparameters in one place
 ├── ReAgentV_utils/                       # All utility modules and helper scripts
 │   ├── critical_question_generator/      # “Critical Question” generation logic
 │   │   └── generate_critical_question.py # Code to produce follow-up critical questions
 │   ├── frame_selection_ecrs/             # Entropy-Calibrated Frame Selection (ECRS) module
 │   │   └── ECRS_frame_selection.py       # ECRS implementation for optimal key-frame extraction
+│   ├── memory/                           # Adaptive Memory Bank & retry history tracker
+│   │   └── memory_bank.py                # Memory bank state machine & distractor repelling
 │   ├── model_inference/                  # Inference wrappers for LLaVA and related models
 │   │   └── model_inference.py            # High-performance inference routines
 │   ├── model_loader/                     # Model initialization and config loader
 │   │   ├── load_config_vars.py           # Reads global YAML configuration
 │   │   └── load_default.py               # Launches CLIP, Whisper, LLaVA, etc., with best-practice defaults
-│   ├── prompt_builder/                   # Multimodal prompt assembly logic
+│   ├── prompt_builder/                   # Multimodal & CoVR prompt assembly logic
 │   │   ├── build_multimodal_prompt.py    # Crafts the ultimate prompt from multimodal inputs
+│   │   ├── covr_prompt.py                # CoT visual observation and tournament prompt templates
 │   │   └── prompt.py                     # Sophisticated prompt templates and formatting
-│   ├── ReAgentV_config/                  # Centralized configuration folder
-│   │   └── config.yaml                   # All thresholds, flags, and hyperparameters in one place
-│   └── tools/                            # Full suite of multimodal tools (OCR, ASR, Object Detection, etc.)
-│       ├── audio_tools/                  # Audio processing + advanced ASR
-│       │   └── asr_utils.py              # Speech-to-text implementation
-│       ├── ocr_tools/                    # OCR extraction and text processing
-│       │   └── ocr_utils.py              # OCR implementation
-│       ├── rag_retriever_dynamic.py      # Dynamic RAG (Retrieval-Augmented Generation) helper
-│       ├── scene_graph_tools/            # Scene Graph analysis & object detection
-│       │   ├── det_utils.py              # Object detection models + parsing utilities
-│       │   ├── filter_keywords.py        # Keyword extraction for guiding scene graph queries
-│       │   └── scene_graph.py            # Scene graph construction and relationship summarization
-│       ├── tool_selection.py             # Intelligent tool-selection logic per query
-│       └── video_processor/              # Video and audio preprocessing pipelines
-│           ├── process_audio.py          # High-fidelity audio extraction and pre-processing
-│           └── process_video.py          # ffmpeg-based frame sampling, resizing, and normalization
-├── models/                               # Pretrained model weights (CLIP, Whisper, LLaVA) and caches
-│   ├── clip-vit-large-patch14-336/       # CLIP weight snapshots
-│   │   └── snapshots/<commit-id>/        # Specific snapshot ID
-│   ├── whisper-large/                    # Whisper weight snapshots
-│   │   └── snapshots/<commit-id>/
-│   └── llava-video-7b-qwen2/             # LLaVA-Video-7B-Qwen2 weight snapshots
-│       └── snapshots/<commit-id>/
+│   ├── tools/                            # Full suite of multimodal tools (OCR, ASR, Object Detection, etc.)
+│   │   ├── audio_tools/                  # Audio processing + advanced ASR (Whisper)
+│   │   │   └── asr_utils.py              # Speech-to-text implementation
+│   │   ├── ocr_tools/                    # OCR extraction and text processing
+│   │   │   ├── ocr_utils.py              # OCR implementation
+│   │   │   └── rag_retriever_dynamic.py  # Dynamic RAG helper
+│   │   ├── scene_graph_tools/            # Scene Graph analysis & object detection
+│   │   │   ├── det_utils.py              # Object detection models + parsing utilities
+│   │   │   ├── filter_keywords.py        # Keyword extraction for guiding scene graph queries
+│   │   │   └── scene_graph.py            # Scene graph construction and relationship summarization
+│   │   ├── tool_selection.py             # Intelligent tool-selection logic per query
+│   │   └── extract_modal_info.py         # Modal feature extraction orchestrator
+│   └── video_processor/                  # Video and audio preprocessing pipelines
+│       ├── covr_loader.py                # Dataset loader for WebVid-CoVR triplets & subcorpus sync
+│       ├── process_audio.py              # Audio extraction and pre-processing
+│       └── process_video.py              # Decord/OpenCV frame sampling and normalization
 ├── requirements.txt                      # Python dependencies (for `pip install -r requirements.txt`)
-└── README.md                             # This file: world-class documentation
-````
+└── README.md                             # Comprehensive technical documentation
+```
 
 ---
 
@@ -161,13 +163,47 @@ ReAgentV-NeXT/                             # Repository root
    }
    ```
 
-## 🚀 Run the Pipeline
+## 🚀 Run the Pipelines
 
+### 1. Video Question Answering (Video QA)
 ```bash
 python run_pipeline.py
 ```
+Orchestrates frame extraction (ECRS), multimodal tool invocation (OCR/ASR/DET), prompt synthesis, and reflective answer generation.
 
-At this point, you’ll witness ReAgent-V in action: **lightning-fast frame extraction**, **precise multimodal retrieval**, and **reflective answer generation**—all orchestrated in a modular, extensible fashion.
+### 2. Composed Video Retrieval (CoVR)
+#### Stage 1: Build 4-Frame Temporal Corpus Index
+```bash
+python covr_indexer.py \
+    --video_dir /path/to/webvid/train \
+    --output_path ./covr_corpus_index_4f.pt \
+    --num_frames 4 \
+    --batch_size 32 \
+    --device cuda
+```
+
+#### Stage 2: Single-Query Retrieval Demo
+```bash
+python run_covr_retrieval.py \
+    --csv_path /path/to/webvid8m-covr_test.csv \
+    --video_dir /path/to/webvid/train \
+    --index_path ./covr_corpus_index_4f.pt \
+    --sample_idx 0 \
+    --top_k 10 \
+    --max_iterations 2
+```
+
+#### Stage 3: Full Quantitative Benchmark Evaluation (Recall@K & MRR)
+```bash
+python eval_covr_benchmark.py \
+    --csv_path /path/to/webvid8m-covr_test.csv \
+    --video_dir /path/to/webvid/train \
+    --index_path ./covr_corpus_index_4f.pt \
+    --num_samples 100 \
+    --top_k 10 \
+    --max_iterations 2 \
+    --output_path ./eval_results.json
+```
 
 ---
 

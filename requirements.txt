@@ -1,0 +1,43 @@
+# ==============================================================================
+# ReAgent-V: Requirements & Dependencies
+# ==============================================================================
+
+# Core Deep Learning Framework
+torch>=2.1.0
+torchvision>=0.16.0
+torchaudio>=2.1.0
+
+# Hugging Face & Modeling Stack
+transformers>=4.40.0
+accelerate>=0.29.3
+timm>=0.9.16
+einops>=0.6.1
+einops-exts>=0.0.4
+bitsandbytes>=0.41.0
+
+# Video, Audio & Image Processing
+decord>=0.6.0
+opencv-python-headless>=4.8.0
+Pillow>=9.5.0
+ffmpeg-python>=0.2.0
+soundfile>=0.12.1
+librosa>=0.10.1
+
+# Multimodal Tools (OCR, Graph & NLP)
+easyocr>=1.7.0
+networkx>=3.1
+spacy>=3.7.0
+
+# Fast Similarity Search & Data Utilities
+faiss-cpu>=1.7.4
+numpy>=1.24.0
+pandas>=2.0.0
+pyyaml>=6.0.1
+tqdm>=4.65.0
+requests>=2.31.0
+
+# Notes on specialized libraries:
+# 1. LLaVA-NeXT / LLaVA-OneVision:
+#    pip install --no-deps git+https://github.com/LLaVA-VL/LLaVA-NeXT.git
+# 2. Flash-Attention 2 (Recommended for CUDA acceleration):
+#    pip install flash-attn --no-build-isolation

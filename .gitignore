@@ -1,10 +1,13 @@
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+
+# C extensions
 .Python
-env/
+
+# Distribution / packaging
 build/
 develop-eggs/
 dist/
@@ -21,7 +24,8 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual Environments
+# Virtual environments
+env/
 venv/
 ENV/
 env.bak/
@@ -31,13 +35,34 @@ venv.bak/
 .ipynb_checkpoints
 err.ipynb
 
-# Scratch & temporary files
+# Scratch, results & temporary logs
+result/
+scratch/
+*.log
+*.tmp
+*.bak
+temp3*.txt
 extracted_experiments.txt
 appendix_datasets.txt
 
-# Weights & models cache
+# Model weights & large datasets
 models/
 cache_models/
 *.pt
+*.pth
 *.bin
 *.safetensors
+*.onnx
+
+# Documents & office files
+*.docx
+*.pptx
+*.drawio.bkp
+
+# IDEs & OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
