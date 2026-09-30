@@ -795,39 +795,33 @@ class ReAgentV:
                 confidence = avg_conf
                 reason = f"Consistent preference for Candidate A across both orientations ({reason_1})"
         else:
-            # Position variance / Split decision / Dead heat (pref_1 != pref_2):
-            # Candidate A was initial top-1 mainly due to CLIP coarse score, but Challenger B is competing closely.
-            # 1. Net edit fidelity advantage (>= 0.01) without context collapse
-            if b_net >= 0.01 and pres_diff >= -0.05:
+            # 1. Clear net edit fidelity advantage (>= 0.02) without context collapse
+            if b_net >= 0.02 and pres_diff >= -0.05:
                 preferred = "B"
                 confidence = max(conf_1, conf_2)
-                reason = f"Challenger B demonstrated net edit fidelity advantage ({b_net:+.3f}) despite position variance."
-            # 2. Pure transformation fidelity advantage (Challenger B executes edit more distinctly)
-            elif edit_diff >= 0.01 and pres_diff >= -0.05:
+                reason = f"Challenger B demonstrated decisive net edit advantage ({b_net:+.3f}) despite position variance."
+            # 2. Distinct transformation fidelity advantage (Challenger B executes edit more distinctly)
+            elif edit_diff >= 0.02 and pres_diff >= -0.05:
                 preferred = "B"
                 confidence = max(conf_1, conf_2)
                 reason = f"Challenger B demonstrated higher transformation fidelity ({avg_edit_b:.2f} vs {avg_edit_a:.2f})."
-            # 3. Challenger B has higher pointwise LLaVA score than Candidate A
-            elif rel_b > rel_a and pres_diff >= -0.04:
+            # 3. Challenger B has decisively higher pointwise LLaVA score than Candidate A
+            elif rel_b >= rel_a + 0.03 and pres_diff >= -0.04:
                 preferred = "B"
                 confidence = max(conf_1, conf_2)
                 reason = f"Challenger B has superior pointwise edit verification (rel={rel_b:.3f} vs {rel_a:.3f})."
-            # 4. Decisive confidence in Challenger orientation
-            elif conf_2 > conf_1 + 0.04 and pres_diff >= -0.04:
+            # 4. Decisive confidence advantage in Challenger orientation
+            elif conf_2 >= conf_1 + 0.08 and pres_diff >= -0.04:
                 preferred = "B"
                 confidence = conf_2
-                reason = f"Challenger B demonstrated stronger verification confidence ({conf_2:.2f} vs {conf_1:.2f})."
-            # 5. Dead tie (|b_net| <= 0.01): When both are valid matches (rel >= 0.65) and neither degraded context,
-            # promote Challenger B if its pointwise verification matches or exceeds A, breaking CLIP distractor bias.
-            elif abs(b_net) <= 0.01 and rel_b >= rel_a and pres_diff >= -0.04 and rel_b >= 0.65:
-                preferred = "B"
-                confidence = avg_conf
-                reason = f"Challenger B promoted on parity: matched edit verification (rel={rel_b:.2f}) and overcame CLIP reference bias."
-            # 6. Incumbent retains if Challenger failed criteria or showed negative deficit
+                reason = f"Challenger B demonstrated significantly stronger verification confidence ({conf_2:.2f} vs {conf_1:.2f})."
+            # 5. Incumbent Shield on tie or marginal difference:
+            # Candidate A holds the higher prior hybrid/CLIP retrieval score. In the absence of a decisive
+            # Challenger advantage, Candidate A is preserved to prevent noise-driven demotions.
             else:
                 preferred = "A"
                 confidence = max(conf_1, conf_2)
-                reason = f"Incumbent Shield: Retained Candidate A as Top-1 (b_net={b_net:+.3f}, edit_diff={edit_diff:+.3f}, ranks {clip_rank_a+1} vs {clip_rank_b+1})."
+                reason = f"Incumbent Shield: Retained Candidate A as Top-1 on tie/parity (b_net={b_net:+.3f}, edit_diff={edit_diff:+.3f}, ranks {clip_rank_a+1} vs {clip_rank_b+1})."
 
         return preferred, confidence, reason
 
@@ -1065,11 +1059,10 @@ class ReAgentV:
             rel_1 = score_cache.get(c1_path, (0.0, ""))[0]
             rel_2 = score_cache.get(c2_path, (0.0, ""))[0]
 
-            # Trigger tournament when Top-1 and Top-2 are both valid matches or in genuine competition:
+            # Trigger tournament when Top-1 and Top-2 are in genuine close competition (margin <= 0.08):
             trigger_tournament = (
-                (verdict_1 == "MATCH" and verdict_2 == "MATCH" and score_margin <= 0.15) or
-                (rel_1 >= 0.65 and rel_2 >= 0.65 and score_margin <= 0.10) or
-                (rel_2 >= 0.70 and score_margin <= 0.12)
+                (score_margin <= 0.06 and rel_1 >= 0.65 and rel_2 >= 0.65) or
+                (verdict_1 == "MATCH" and verdict_2 == "MATCH" and score_margin <= 0.08)
             )
 
 
