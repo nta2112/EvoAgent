@@ -20,16 +20,20 @@ from typing import Optional
 def load_covr_annotations(
     csv_path: str,
     video_base_dir: str,
-    num_samples: Optional[int] = None
+    num_samples: Optional[int] = None,
+    start_idx: int = 0,
+    end_idx: Optional[int] = None,
 ) -> pd.DataFrame:
     """
-    Load and validate CoVR annotation CSV.
+    Load and validate CoVR annotation CSV with optional sharding support.
 
     Args:
         csv_path       : Path to webvid8m-covr_test.csv
         video_base_dir : Root directory containing video subfolders
                          (e.g. /kaggle/input/covr/datasets/WebVid/8M/train)
         num_samples    : If set, use only the first N rows (for fast debugging).
+        start_idx      : Shard start query index (0-indexed).
+        end_idx        : Shard end query index (None for until the end).
 
     Returns:
         pd.DataFrame with columns verified to have matching video files on disk.
@@ -38,9 +42,6 @@ def load_covr_annotations(
           - 'target_video_path' : Full absolute path for pth2.mp4
     """
     df = pd.read_csv(csv_path)
-
-    if num_samples is not None:
-        df = df.iloc[:num_samples].reset_index(drop=True)
 
     def build_path(rel_pth: str) -> str:
         return os.path.join(video_base_dir, rel_pth + ".mp4")
@@ -62,7 +63,19 @@ def load_covr_annotations(
         df["target_video_path"].apply(os.path.exists)
     )
     df = df[valid_mask].reset_index(drop=True)
-    print(f"[CoVR Loader] Loaded {len(df)} valid query triplets.")
+    total_valid = len(df)
+
+    # Apply sharding or sample capping
+    if start_idx > 0 or end_idx is not None:
+        actual_end = min(end_idx, total_valid) if end_idx is not None else total_valid
+        df = df.iloc[start_idx:actual_end].reset_index(drop=True)
+        print(f"[CoVR Loader] Loaded shard [{start_idx}:{actual_end}] ({len(df)} queries) from {total_valid} valid query triplets.")
+    elif num_samples is not None:
+        df = df.iloc[:num_samples].reset_index(drop=True)
+        print(f"[CoVR Loader] Loaded {len(df)} valid query triplets (capped by num_samples={num_samples}).")
+    else:
+        print(f"[CoVR Loader] Loaded all {len(df)} valid query triplets.")
+
     return df
 
 
