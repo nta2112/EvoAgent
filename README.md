@@ -4,8 +4,6 @@
 
 ## Architecture Overview
 
-![Framework Overview](assets/framework.png)
-
 ### Core Pillars:
 1. **Composed Video Retrieval (CoVR) Pipeline**:
    - **4-Frame Temporal Indexing**: Extracts multi-frame temporal representations using `decord`, encoded via CLIP ViT-L/14-336 combined with temporal mean-pooling and L2 normalization, overcoming the limitations of single static frame indexing.
