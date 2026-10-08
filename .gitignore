@@ -34,6 +34,7 @@ venv.bak/
 # Jupyter Notebook
 .ipynb_checkpoints
 err.ipynb
+notebooks/
 
 # Scratch, results & temporary logs
 result/
